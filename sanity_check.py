@@ -69,6 +69,22 @@ class AlwaysInWithLevelsStrategy(BaseStrategy):
             self.buy(stop_loss=sl, take_profit=tp, tag=f"{sl:.10f}|{tp:.10f}")
 
 
+class RiskSizedStrategy(BaseStrategy):
+    """Лонг с сайзингом от риска: убыток по SL должен равняться risk_pct эквити."""
+
+    params = {"risk_pct": 0.02, "sl_pct": 0.01}
+
+    def init(self) -> None:
+        pass
+
+    def next(self, bar: Bar) -> None:
+        if self.position is None:
+            self.buy(
+                risk_pct=self.p["risk_pct"],
+                stop_loss=bar.close * (1.0 - self.p["sl_pct"]),
+            )
+
+
 # ---------------------------------------------------------------------- #
 # Проверки
 # ---------------------------------------------------------------------- #
@@ -175,6 +191,40 @@ def check_5_reproducibility() -> None:
     )
 
 
+def check_6_risk_sizing() -> None:
+    """Сайзинг от риска: убыток по SL == risk_pct от эквити на момент входа.
+
+    Без комиссий и слиппеджа выход ровно по уровню SL теряет точно
+    risk_pct; гэп через уровень может потерять больше, но никогда меньше.
+    """
+    data = generate_synthetic_data(n_bars=1500, volatility=0.008, seed=66)
+    result = BacktestEngine(
+        data, RiskSizedStrategy, cash=10_000,
+        commission_pct=0.0, slippage_pct=0.0,
+    ).run()
+    risk_pct = RiskSizedStrategy.params["risk_pct"]
+
+    sl_trades = [t for t in result.trades if t.exit_reason is ExitReason.STOP_LOSS]
+    never_less = True   # убыток не меньше заявленного риска
+    exact_hits = 0      # выходы ровно по уровню (без гэпа) -- точное равенство
+    for t in sl_trades:
+        # Эквити на момент входа = эквити закрытия предыдущего бара
+        # (позиции не было, исполнение на открытии entry_bar)
+        equity_before = float(result.equity_curve.iloc[t.entry_bar - 1])
+        expected_loss = equity_before * risk_pct
+        tol = equity_before * 1e-9
+        if -t.pnl < expected_loss - tol:
+            never_less = False
+        if abs(-t.pnl - expected_loss) <= tol:
+            exact_hits += 1
+
+    report(
+        "Сайзинг от риска: убыток по SL == risk_pct эквити (или больше при гэпе)",
+        bool(sl_trades) and never_less and exact_hits > 0,
+        f"выходов по SL: {len(sl_trades)}, из них ровно по уровню: {exact_hits}",
+    )
+
+
 def main() -> int:
     print("=" * 70)
     print("ПРОВЕРКИ ЧЕСТНОСТИ ДВИЖКА")
@@ -185,6 +235,7 @@ def main() -> int:
         check_3_costs_hurt,
         check_4_sl_tp_levels,
         check_5_reproducibility,
+        check_6_risk_sizing,
     ):
         check()
 

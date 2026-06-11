@@ -37,10 +37,13 @@ def kama(price: np.ndarray, period: int, fast: int, slow: int) -> np.ndarray:
         return out
     fast_sc = 2.0 / (fast + 1.0)
     slow_sc = 2.0 / (slow + 1.0)
+    # Кумулятивная сумма |p[k]-p[k-1]|: волатильность окна за O(1) вместо
+    # пересуммирования окна на каждом баре (O(n*period) -> O(n))
+    cum_abs_diff = np.concatenate(([0.0], np.cumsum(np.abs(np.diff(price)))))
     out[period - 1] = price[period - 1]  # затравочное значение
     for i in range(period, n):
         change = abs(price[i] - price[i - period])
-        volatility = np.sum(np.abs(np.diff(price[i - period : i + 1])))
+        volatility = cum_abs_diff[i] - cum_abs_diff[i - period]
         er = change / volatility if volatility != 0.0 else 0.0
         sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
         out[i] = out[i - 1] + sc * (price[i] - out[i - 1])
@@ -56,12 +59,11 @@ def atr_wilder(high: np.ndarray, low: np.ndarray, close: np.ndarray,
         return out
     tr = np.empty(n)
     tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1]),
-        )
+    tr[1:] = np.maximum.reduce([
+        high[1:] - low[1:],
+        np.abs(high[1:] - close[:-1]),
+        np.abs(low[1:] - close[:-1]),
+    ])
     out[period] = np.mean(tr[1 : period + 1])  # первое значение — SMA TR
     for i in range(period + 1, n):
         out[i] = (out[i - 1] * (period - 1) + tr[i]) / period

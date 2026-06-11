@@ -73,6 +73,7 @@ class Order:
     limit_price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    risk_pct: Optional[float] = None    # сайзинг от риска: доля эквити под SL
     tag: str = ""
     status: OrderStatus = OrderStatus.PENDING
     created_bar: int = -1
@@ -248,10 +249,21 @@ class Broker:
         limit_price: Optional[float] = None,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
+        risk_pct: Optional[float] = None,
         tag: str = "",
     ) -> Order:
         if size is not None and size <= 0:
             raise ValueError("Размер ордера должен быть положительным")
+        if risk_pct is not None:
+            if size is not None:
+                raise ValueError("size и risk_pct взаимоисключающие")
+            if not 0 < risk_pct:
+                raise ValueError("risk_pct должен быть положительным")
+            if stop_loss is None:
+                raise ValueError(
+                    "Сайзинг от риска требует stop_loss: размер позиции "
+                    "вычисляется из дистанции до стопа"
+                )
         order = Order(
             id=next(self._order_ids),
             side=side,
@@ -260,6 +272,7 @@ class Broker:
             limit_price=limit_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            risk_pct=risk_pct,
             tag=tag,
             created_bar=self._current_bar.index if self._current_bar else -1,
         )
@@ -301,9 +314,27 @@ class Broker:
     def _auto_size(self, price: float) -> float:
         return max(self.equity * self.default_size_pct, 0.0) / price
 
+    def _risk_size(self, order: Order, price: float) -> float:
+        """Размер позиции от риска: equity * risk_pct / дистанция до стопа.
+
+        Потеря при выходе ровно по SL равна risk_pct от эквити на момент
+        входа (без учёта комиссий, слиппеджа и гэпов через уровень --
+        они могут увеличить фактический убыток).
+        """
+        assert order.stop_loss is not None and order.risk_pct is not None
+        distance = order.side.value * (price - order.stop_loss)
+        if distance <= 0:  # стоп по неправильную сторону от цены входа
+            return 0.0
+        return max(self.equity, 0.0) * order.risk_pct / distance
+
     def _execute(self, order: Order, price: float, bar: Bar) -> None:
         """Исполняет ордер по цене price с учётом неттинга позиции."""
-        size = order.size if order.size is not None else self._auto_size(price)
+        if order.size is not None:
+            size = order.size
+        elif order.risk_pct is not None:
+            size = self._risk_size(order, price)
+        else:
+            size = self._auto_size(price)
         if size <= 0:
             order.status = OrderStatus.REJECTED
             self.pending_orders.remove(order)

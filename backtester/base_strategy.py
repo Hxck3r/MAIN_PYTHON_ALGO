@@ -23,7 +23,7 @@ if TYPE_CHECKING:  # только для аннотаций, избегаем ц
     from .backtest_engine import Broker, Order, Position
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Bar:
     """Один бар рыночных данных, передаётся в Strategy.next()."""
 
@@ -199,15 +199,25 @@ class BaseStrategy(ABC):
         limit_price: Optional[float] = None,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
+        risk_pct: Optional[float] = None,
         tag: str = "",
     ) -> "Order":
         """Покупка. Без limit_price -- рыночный ордер (исполнение на открытии
-        следующего бара). size=None -- автосайзинг от текущего эквити."""
+        следующего бара).
+
+        Сайзинг (взаимоисключающие варианты):
+            * size       -- явный размер в единицах актива;
+            * risk_pct   -- от риска: размер подбирается так, чтобы убыток
+                            при выходе ровно по stop_loss составил risk_pct
+                            от эквити (требует stop_loss);
+            * ничего     -- автосайзинг: default_size_pct от эквити.
+        """
         return self.broker.buy(
             size=size,
             limit_price=limit_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            risk_pct=risk_pct,
             tag=tag,
         )
 
@@ -217,6 +227,7 @@ class BaseStrategy(ABC):
         limit_price: Optional[float] = None,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
+        risk_pct: Optional[float] = None,
         tag: str = "",
     ) -> "Order":
         """Продажа (открытие шорта или разворот). Семантика как у buy()."""
@@ -225,6 +236,7 @@ class BaseStrategy(ABC):
             limit_price=limit_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            risk_pct=risk_pct,
             tag=tag,
         )
 

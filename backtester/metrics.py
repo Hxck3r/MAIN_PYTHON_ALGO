@@ -87,13 +87,19 @@ class PerformanceMetrics:
 
 
 def _estimate_periods_per_year(index: pd.Index) -> int:
-    """Оценка числа торговых периодов в году по медианному шагу индекса."""
+    """Оценка числа торговых периодов в году по фактической плотности баров.
+
+    Считается как (число баров - 1) / (календарная длительность данных в годах):
+    выходные и праздники, когда рынок закрыт, автоматически уменьшают оценку.
+    Оценка по медианному шагу (например, 15 минут -> ~35000) завышала бы
+    periods_per_year и вместе с ним Sharpe/Sortino на внутридневных данных.
+    """
     if not isinstance(index, pd.DatetimeIndex) or len(index) < 3:
         return 252
-    step = index.to_series().diff().median()
-    if step is pd.NaT or step.total_seconds() <= 0:
+    span_seconds = (index[-1] - index[0]).total_seconds()
+    if span_seconds <= 0:
         return 252
-    return max(int(round(SECONDS_PER_YEAR / step.total_seconds())), 1)
+    return max(int(round((len(index) - 1) * SECONDS_PER_YEAR / span_seconds)), 1)
 
 
 def max_drawdown_info(equity: pd.Series) -> tuple[float, float, int]:
