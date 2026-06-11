@@ -12,11 +12,14 @@ from PySide6.QtCore import QThread, Signal
 
 from backtester import (
     BacktestEngine,
+    BacktestResult,
     BaseStrategy,
     GeneticOptimizer,
     GridSearchOptimizer,
+    MonteCarloConfig,
     WalkForwardConfig,
     make_backtest_objective,
+    run_monte_carlo,
     run_walk_forward,
 )
 from backtester.parallel import ParallelEvaluator
@@ -138,6 +141,34 @@ class OptimizationWorker(QThread):
             if evaluator is not None:
                 evaluator.close()
         self.finished_ok.emit(result)
+
+
+class MonteCarloWorker(QThread):
+    """Монте-Карло анализ сделок бэктеста в фоне с прогрессом."""
+
+    finished_ok = Signal(object)   # MonteCarloResult
+    failed = Signal(str)
+    progress = Signal(int, int)    # (симуляций сделано, всего)
+
+    def __init__(
+        self,
+        result: BacktestResult,
+        config: MonteCarloConfig,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.result = result
+        self.config = config
+
+    def run(self) -> None:
+        try:
+            mc = run_monte_carlo(
+                self.result, self.config, progress_callback=self.progress.emit
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit(mc)
 
 
 class WalkForwardWorker(QThread):

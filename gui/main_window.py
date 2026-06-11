@@ -40,6 +40,8 @@ from PySide6.QtWidgets import (
 from backtester import (
     BacktestResult,
     DataLoader,
+    MonteCarloConfig,
+    MonteCarloResult,
     OptimizationResult,
     WalkForwardConfig,
     WalkForwardResult,
@@ -50,11 +52,17 @@ from backtester.metrics import CRITERIA
 from strategies import STRATEGIES
 
 from .chart_widget import ChartWidget
+from .mc_panel import McPanel
 from .opt_charts import OptimizationChartsPanel
 from .param_table import ParamTable
 from .results_panel import MetricsTable, OptimizationTable, TradesTable
 from .wfa_panel import WfaPanel
-from .workers import BacktestWorker, OptimizationWorker, WalkForwardWorker
+from .workers import (
+    BacktestWorker,
+    MonteCarloWorker,
+    OptimizationWorker,
+    WalkForwardWorker,
+)
 
 
 class MainWindow(QMainWindow):
@@ -66,6 +74,7 @@ class MainWindow(QMainWindow):
         self._data: Optional[pd.DataFrame] = None        # полные данные
         self._worker: Optional[Any] = None               # активный поток
         self._last_opt: Optional[OptimizationResult] = None
+        self._last_result: Optional[BacktestResult] = None  # для Монте-Карло
 
         self._build_ui()
         self._on_strategy_changed()
@@ -229,9 +238,17 @@ class MainWindow(QMainWindow):
         self.btn_optimize.clicked.connect(self._run_optimization)
         self.btn_wfa = QPushButton("📈  Walk-Forward")
         self.btn_wfa.clicked.connect(self._run_wfa)
+        self.btn_mc = QPushButton("🎲  Монте-Карло")
+        self.btn_mc.setToolTip(
+            "Анализ устойчивости последнего бэктеста: перемешивание сделок,\n"
+            "распределение доходностей и просадок, вероятности целей.\n"
+            "Настройки — во вкладке «Монте-Карло»."
+        )
+        self.btn_mc.clicked.connect(self._run_monte_carlo_clicked)
         layout.addWidget(self.btn_backtest)
         layout.addWidget(self.btn_optimize)
         layout.addWidget(self.btn_wfa)
+        layout.addWidget(self.btn_mc)
         layout.addStretch(1)
         return panel
 
@@ -275,6 +292,10 @@ class MainWindow(QMainWindow):
         self.wfa_panel = WfaPanel()
         self.wfa_panel.params_activated.connect(self._apply_and_backtest)
         self.tabs.addTab(self.wfa_panel, "Walk-Forward")
+
+        self.mc_panel = McPanel()
+        self.mc_panel.run_requested.connect(self._run_monte_carlo)
+        self.tabs.addTab(self.mc_panel, "Монте-Карло")
 
         self.log = QPlainTextEdit(readOnly=True)
         self.tabs.addTab(self.log, "Журнал")
@@ -353,6 +374,8 @@ class MainWindow(QMainWindow):
         self.btn_backtest.setEnabled(not busy)
         self.btn_optimize.setEnabled(not busy)
         self.btn_wfa.setEnabled(not busy)
+        self.btn_mc.setEnabled(not busy)
+        self.mc_panel.set_running(busy)
         self.progress.setVisible(busy)
         if busy:
             self.progress.setRange(0, 0)  # «бегунок», пока нет точного прогресса
@@ -556,6 +579,74 @@ class MainWindow(QMainWindow):
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
+    # ================================================================== #
+    # Монте-Карло
+    # ================================================================== #
+    def _run_monte_carlo_clicked(self) -> None:
+        """Кнопка слева: открыть вкладку и запустить с её настройками."""
+        self.tabs.setCurrentWidget(self.mc_panel)
+        self._run_monte_carlo(self.mc_panel.make_config())
+
+    def _run_monte_carlo(self, config: MonteCarloConfig) -> None:
+        if self._last_result is None or not self._last_result.trades:
+            QMessageBox.information(
+                self, "Монте-Карло",
+                "Сначала выполните бэктест (кнопка «Старт») — Монте-Карло "
+                "перемешивает сделки последнего прогона.",
+            )
+            return
+        n_trades = len(self._last_result.trades)
+        if n_trades < 5:
+            QMessageBox.warning(
+                self, "Монте-Карло",
+                f"В бэктесте всего {n_trades} сделок — минимум 5. "
+                f"Расширьте период или смягчите параметры стратегии.",
+            )
+            return
+        if n_trades < 30:
+            self._log(
+                f"Монте-Карло: внимание, сделок всего {n_trades} (<30) — "
+                f"доверительные интервалы будут широкими и ненадёжными"
+            )
+
+        self._set_busy(True, "Монте-Карло...")
+        self._log(
+            f"Монте-Карло: {config.n_sims} симуляций, метод {config.method}, "
+            f"сайзинг {config.sizing}, сделок {n_trades}, "
+            f"цель +{config.target_return_pct:g}%, лимит DD {config.dd_limit_pct:g}%"
+        )
+        self._worker = MonteCarloWorker(self._last_result, config, parent=self)
+        self._worker.progress.connect(self._on_progress_simple)
+        self._worker.finished_ok.connect(self._on_mc_done)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _on_progress_simple(self, done: int, total: int) -> None:
+        self.progress.setRange(0, total)
+        self.progress.setValue(done)
+
+    def _on_mc_done(self, result: MonteCarloResult) -> None:
+        self._set_busy(False)
+        self.mc_panel.show_result(result)
+        self.tabs.setCurrentWidget(self.mc_panel)
+        summary = (
+            f"Монте-Карло завершён: медианная доходность "
+            f"{result.return_percentile(50):+.2f}% "
+            f"[P5 {result.return_percentile(5):+.2f}% … "
+            f"P95 {result.return_percentile(95):+.2f}%], "
+            f"P(прибыль) {result.prob_profit_pct:.0f}%, "
+            f"P(цель) {result.prob_target_pct:.0f}%, "
+            f"P95 просадка {result.dd_percentile(95):.2f}%, "
+            f"риск разорения {result.risk_of_ruin_pct:.2f}%"
+        )
+        self._log(summary)
+        if result.original_return_rank_pct >= 95:
+            self._log(
+                "⚠ Монте-Карло: исходный бэктест в топ-5% облака симуляций — "
+                "кривая, вероятно, обязана удачному порядку сделок (переподгонка)"
+            )
+        self.statusBar().showMessage(summary)
+
     def _on_wfa_progress(self, done: int, total: int) -> None:
         self.progress.setRange(0, total)
         self.progress.setValue(done)
@@ -588,6 +679,7 @@ class MainWindow(QMainWindow):
 
     def _on_backtest_done(self, result: BacktestResult) -> None:
         self._set_busy(False)
+        self._last_result = result
         stats = result.stats()
         self.metrics_table.show_result(result)
         self.trades_table.show_result(result)

@@ -105,6 +105,28 @@ def main() -> None:
     wait_worker(app, window)
     print("OK: применение параметров из окна WFA")
 
+    # --- Монте-Карло: все методы по сделкам последнего бэктеста --------- #
+    assert window._last_result is not None, "нет сохранённого бэктеста для МК"
+    mc = window.mc_panel
+    mc.spin_sims.setValue(500)
+    for i in range(mc.combo_method.count()):
+        mc.combo_method.setCurrentIndex(i)
+        window._run_monte_carlo(mc.make_config())
+        wait_worker(app, window)
+        assert mc.summary.rowCount() > 0, "сводка Монте-Карло пуста"
+        assert len(mc.fan_plot.listDataItems()) > 0, "веер эквити пуст"
+        assert len(mc.ret_hist.items) > 0, "гистограмма доходностей пуста"
+        assert len(mc.dd_hist.items) > 0, "гистограмма просадок пуста"
+        assert len(mc.cdf_plot.listDataItems()) > 0, "CDF пуста"
+        print(f"OK: Монте-Карло «{mc.combo_method.currentText()}», "
+              f"строк сводки: {mc.summary.rowCount()}")
+
+    # кнопка слева запускает МК и открывает вкладку
+    window._run_monte_carlo_clicked()
+    wait_worker(app, window)
+    assert window.tabs.currentWidget() is mc, "вкладка Монте-Карло не активна"
+    print("OK: кнопка «Монте-Карло» на панели слева")
+
     print("ВСЕ ПРОВЕРКИ ДЕСКТОПНОГО GUI ПРОЙДЕНЫ")
 
 

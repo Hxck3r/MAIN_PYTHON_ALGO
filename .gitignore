@@ -18,3 +18,4 @@ data/
 # IDE
 .vscode/
 .idea/
+.directory

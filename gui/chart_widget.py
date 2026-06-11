@@ -25,9 +25,15 @@
 """
 from __future__ import annotations
 
+import locale
 import os
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
+
+# finplot >= 1.9.4 при импорте молча вызывает os._exit(1), если
+# locale.getdefaultlocale() возвращает ru/by. Подменяем функцию до импорта;
+# на реальную локаль приложения это не влияет.
+locale.getdefaultlocale = lambda *a: ("en_US", "UTF-8")
 
 import finplot as fplt
 import numpy as np
