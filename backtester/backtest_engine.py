@@ -37,6 +37,7 @@ from .base_strategy import Bar, BaseStrategy
 class OrderType(Enum):
     MARKET = "market"
     LIMIT = "limit"
+    STOP = "stop"
 
 
 class OrderSide(Enum):
@@ -71,6 +72,7 @@ class Order:
     type: OrderType
     size: Optional[float]               # None -> автосайзинг при исполнении
     limit_price: Optional[float] = None
+    stop_price: Optional[float] = None  # стоп-ордер на вход (buy-stop/sell-stop)
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     risk_pct: Optional[float] = None    # сайзинг от риска: доля эквити под SL
@@ -145,6 +147,15 @@ class Broker:
     commission_fixed: фиксированная комиссия за исполнение ордера.
     slippage_pct:     проскальзывание в долях цены, всегда против трейдера
                       (применяется к рыночным и стоповым исполнениям).
+    spread_pct:       спред bid/ask в долях цены. Данные считаются bid-ценами
+                      (как графики MT5): любая ПОКУПКА (вход в лонг, выход из
+                      шорта, включая SL/TP шорта) исполняется по ask =
+                      price * (1 + spread_pct); продажи -- по цене графика.
+    max_leverage:     максимальное плечо: ноционал позиции не может превышать
+                      equity * max_leverage (None -- без ограничения,
+                      как маржинальный счёт с бесконечным плечом).
+                      Размер ордера, превышающий лимит, урезается; ордер,
+                      на который маржи нет вовсе, отклоняется (REJECTED).
     default_size_pct: доля эквити для автосайзинга, когда size не задан.
     """
 
@@ -154,15 +165,23 @@ class Broker:
         commission_pct: float = 0.0,
         commission_fixed: float = 0.0,
         slippage_pct: float = 0.0,
+        spread_pct: float = 0.0,
+        max_leverage: Optional[float] = None,
         default_size_pct: float = 0.95,
     ) -> None:
         if cash <= 0:
             raise ValueError("Начальный капитал должен быть положительным")
+        if spread_pct < 0:
+            raise ValueError("Спред не может быть отрицательным")
+        if max_leverage is not None and max_leverage <= 0:
+            raise ValueError("max_leverage должен быть положительным или None")
         self.initial_cash = cash
         self.cash = cash
         self.commission_pct = commission_pct
         self.commission_fixed = commission_fixed
         self.slippage_pct = slippage_pct
+        self.spread_pct = spread_pct
+        self.max_leverage = max_leverage
         self.default_size_pct = default_size_pct
 
         self.position: Optional[Position] = None
@@ -231,9 +250,10 @@ class Broker:
         """Принудительно закрывает позицию в конце данных по цене закрытия."""
         self.cancel_all_orders()
         if self.position is not None:
+            exit_side = self.position.side.opposite
             self._close_position_part(
                 size=self.position.size,
-                price=bar.close,
+                price=self._apply_spread(bar.close, exit_side),
                 bar=bar,
                 reason=ExitReason.END_OF_DATA,
             )
@@ -247,6 +267,7 @@ class Broker:
         side: OrderSide,
         size: Optional[float] = None,
         limit_price: Optional[float] = None,
+        stop_price: Optional[float] = None,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         risk_pct: Optional[float] = None,
@@ -254,6 +275,8 @@ class Broker:
     ) -> Order:
         if size is not None and size <= 0:
             raise ValueError("Размер ордера должен быть положительным")
+        if limit_price is not None and stop_price is not None:
+            raise ValueError("limit_price и stop_price взаимоисключающие")
         if risk_pct is not None:
             if size is not None:
                 raise ValueError("size и risk_pct взаимоисключающие")
@@ -264,12 +287,19 @@ class Broker:
                     "Сайзинг от риска требует stop_loss: размер позиции "
                     "вычисляется из дистанции до стопа"
                 )
+        if stop_price is not None:
+            order_type = OrderType.STOP
+        elif limit_price is not None:
+            order_type = OrderType.LIMIT
+        else:
+            order_type = OrderType.MARKET
         order = Order(
             id=next(self._order_ids),
             side=side,
-            type=OrderType.LIMIT if limit_price is not None else OrderType.MARKET,
+            type=order_type,
             size=size,
             limit_price=limit_price,
+            stop_price=stop_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
             risk_pct=risk_pct,
@@ -288,25 +318,58 @@ class Broker:
             return None
 
         if order.type is OrderType.MARKET:
-            return self._apply_slippage(bar.open, order.side)
+            return self._apply_spread(
+                self._apply_slippage(bar.open, order.side), order.side
+            )
+
+        if order.type is OrderType.STOP:
+            assert order.stop_price is not None
+            stop = order.stop_price
+            if order.side is OrderSide.BUY:
+                if bar.open >= stop:
+                    raw = bar.open       # гэп через уровень -- по открытию
+                elif bar.high >= stop:
+                    raw = stop
+                else:
+                    return None
+            else:
+                if bar.open <= stop:
+                    raw = bar.open
+                elif bar.low <= stop:
+                    raw = stop
+                else:
+                    return None
+            return self._apply_spread(
+                self._apply_slippage(raw, order.side), order.side
+            )
 
         assert order.limit_price is not None
         limit = order.limit_price
         if order.side is OrderSide.BUY:
             if bar.open <= limit:
-                return bar.open          # открылись ниже лимита -- цена лучше
-            if bar.low <= limit:
-                return limit
+                raw = bar.open           # открылись ниже лимита -- цена лучше
+            elif bar.low <= limit:
+                raw = limit
+            else:
+                return None
         else:
             if bar.open >= limit:
-                return bar.open
-            if bar.high >= limit:
-                return limit
-        return None
+                raw = bar.open
+            elif bar.high >= limit:
+                raw = limit
+            else:
+                return None
+        return self._apply_spread(raw, order.side)
 
     def _apply_slippage(self, price: float, side: OrderSide) -> float:
         """Проскальзывание всегда ухудшает цену для трейдера."""
         return price * (1.0 + side.value * self.slippage_pct)
+
+    def _apply_spread(self, price: float, side: OrderSide) -> float:
+        """Покупка исполняется по ask = bid + спред (данные -- bid-цены)."""
+        if side is OrderSide.BUY:
+            return price * (1.0 + self.spread_pct)
+        return price
 
     def _commission(self, price: float, size: float) -> float:
         return abs(price * size) * self.commission_pct + self.commission_fixed
@@ -327,6 +390,26 @@ class Broker:
             return 0.0
         return max(self.equity, 0.0) * order.risk_pct / distance
 
+    def _cap_leverage(self, order: Order, size: float, price: float) -> float:
+        """Урезает размер так, чтобы ноционал не превышал equity * max_leverage.
+
+        Особенно важно при risk_pct-сайзинге: близкий стоп даёт огромный
+        размер (equity * risk / distance) -- без капа это бесконечное плечо.
+        Объём, закрывающий встречную позицию, маржи не требует и в лимит
+        не входит.
+        """
+        if self.max_leverage is None or price <= 0:
+            return size
+        offset = 0.0
+        pos = self.position
+        if pos is not None:
+            if pos.side is not order.side:
+                offset = pos.size       # неттинг: закрытие освобождает маржу
+            else:
+                offset = -pos.size      # доливка: маржа уже занята позицией
+        cap = max(self.equity, 0.0) * self.max_leverage / price + offset
+        return min(size, max(cap, 0.0))
+
     def _execute(self, order: Order, price: float, bar: Bar) -> None:
         """Исполняет ордер по цене price с учётом неттинга позиции."""
         if order.size is not None:
@@ -335,6 +418,7 @@ class Broker:
             size = self._risk_size(order, price)
         else:
             size = self._auto_size(price)
+        size = self._cap_leverage(order, size, price)
         if size <= 0:
             order.status = OrderStatus.REJECTED
             self.pending_orders.remove(order)
@@ -451,19 +535,23 @@ class Broker:
             sl_hit = sl is not None and bar.high >= sl
             tp_hit = tp is not None and bar.low <= tp
 
+        exit_side = pos.side.opposite
         if sl_hit:
             assert sl is not None
             # Гэп через уровень: исполняемся по цене открытия, она хуже SL
             raw = min(bar.open, sl) if pos.is_long else max(bar.open, sl)
-            price = self._apply_slippage(raw, pos.side.opposite)
+            price = self._apply_spread(
+                self._apply_slippage(raw, exit_side), exit_side
+            )
             self._close_position_part(
                 size=pos.size, price=price, bar=bar, reason=ExitReason.STOP_LOSS
             )
         elif tp_hit:
             assert tp is not None
             raw = max(bar.open, tp) if pos.is_long else min(bar.open, tp)
+            price = self._apply_spread(raw, exit_side)
             self._close_position_part(
-                size=pos.size, price=raw, bar=bar, reason=ExitReason.TAKE_PROFIT
+                size=pos.size, price=price, bar=bar, reason=ExitReason.TAKE_PROFIT
             )
 
 
@@ -560,17 +648,29 @@ class BacktestEngine:
         commission_pct: float = 0.0,
         commission_fixed: float = 0.0,
         slippage_pct: float = 0.0,
+        spread_pct: float = 0.0,
+        max_leverage: Optional[float] = None,
         default_size_pct: float = 0.95,
+        warmup_bars: int = 0,
     ) -> None:
+        """warmup_bars: первые N баров стратегия не вызывается (торговли нет),
+        но индикаторы в init() считаются по всему срезу -- к началу торговли
+        они уже прогреты. Используется WFA, чтобы прогрев не съедал OOS-окно.
+        """
         self._validate_data(data)
+        if warmup_bars < 0 or warmup_bars >= len(data):
+            raise ValueError("warmup_bars должен быть в диапазоне [0, len(data))")
         self.data = data
         self.strategy_cls = strategy_cls
         self.strategy_params = dict(strategy_params or {})
-        self.broker_kwargs: dict[str, float] = dict(
+        self.warmup_bars = int(warmup_bars)
+        self.broker_kwargs: dict[str, Any] = dict(
             cash=cash,
             commission_pct=commission_pct,
             commission_fixed=commission_fixed,
             slippage_pct=slippage_pct,
+            spread_pct=spread_pct,
+            max_leverage=max_leverage,
             default_size_pct=default_size_pct,
         )
 
@@ -617,7 +717,7 @@ class BacktestEngine:
             # 2) последний бар: принудительное закрытие, стратегию не вызываем
             if i == n - 1:
                 broker.finalize(bar)
-            else:
+            elif i >= self.warmup_bars:
                 # 3) торговая логика стратегии на закрытии бара
                 strategy._set_index(i)
                 strategy.next(bar)

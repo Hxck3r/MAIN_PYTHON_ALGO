@@ -50,7 +50,10 @@ class PerformanceMetrics:
     max_drawdown_duration: int = 0     # в барах
     sharpe_ratio: float = 0.0
     sortino_ratio: float = 0.0
+    calmar_ratio: float = 0.0          # CAGR% / MaxDD%
+    annualized_volatility_pct: float = 0.0
     recovery_factor: float = 0.0       # net_profit / max_drawdown
+    exposure_pct: float = 0.0          # % баров с открытой позицией
 
     # Статистика сделок
     total_trades: int = 0
@@ -131,7 +134,10 @@ def sharpe_ratio(
     rf_per_period = risk_free_rate / periods_per_year
     excess = returns - rf_per_period
     std = excess.std(ddof=1)
-    if std == 0 or math.isnan(std):
+    # std сравнивается с масштабом доходностей: у константного ряда std
+    # не точный 0, а ~1e-18 из-за плавающей точки -- без защиты Sharpe
+    # взлетел бы до бессмысленных величин
+    if math.isnan(std) or std <= abs(float(excess.mean())) * 1e-9:
         return 0.0
     return float(excess.mean() / std * math.sqrt(periods_per_year))
 
@@ -151,6 +157,34 @@ def sortino_ratio(
     if downside_std == 0:
         return 0.0
     return float(excess.mean() / downside_std * math.sqrt(periods_per_year))
+
+
+def exposure_pct(trades_df: pd.DataFrame, n_bars: int) -> float:
+    """Доля баров с открытой позицией, % (объединение интервалов сделок).
+
+    Интервалы [entry_bar, exit_bar) сливаются перед суммированием: частичные
+    закрытия дают несколько сделок с пересекающимися интервалами, и простая
+    сумма длительностей завысила бы экспозицию. Без экспозиции Sharpe двух
+    стратегий с разным временем в рынке несравним.
+    """
+    if n_bars <= 0 or trades_df.empty:
+        return 0.0
+    intervals = sorted(
+        zip(
+            trades_df["entry_bar"].to_numpy(dtype=np.int64),
+            trades_df["exit_bar"].to_numpy(dtype=np.int64),
+        )
+    )
+    covered = 0
+    cur_start, cur_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= cur_end:
+            cur_end = max(cur_end, end)
+        else:
+            covered += cur_end - cur_start
+            cur_start, cur_end = start, end
+    covered += cur_end - cur_start
+    return min(covered / n_bars * 100.0, 100.0)
 
 
 def _max_consecutive(mask: np.ndarray) -> int:
@@ -201,11 +235,18 @@ def compute_metrics(
     returns = equity_curve.pct_change().dropna().to_numpy(dtype=np.float64)
     m.sharpe_ratio = sharpe_ratio(returns, ppy, risk_free_rate)
     m.sortino_ratio = sortino_ratio(returns, ppy, risk_free_rate)
+    if len(returns) >= 2:
+        m.annualized_volatility_pct = float(
+            returns.std(ddof=1) * math.sqrt(ppy) * 100.0
+        )
     if m.max_drawdown > 0:
         m.recovery_factor = m.net_profit / m.max_drawdown
+    if m.max_drawdown_pct > 0:
+        m.calmar_ratio = m.cagr_pct / m.max_drawdown_pct
 
     # --- Сделки -------------------------------------------------------- #
     m.total_trades = len(trades_df)
+    m.exposure_pct = exposure_pct(trades_df, len(equity_curve))
     if m.total_trades == 0:
         m.complex_criterion = m.total_return_pct - m.max_drawdown_pct
         return m

@@ -9,6 +9,7 @@
     monte_carlo      -- Монте-Карло анализ сделок (перемешивание/бутстрэп)
     optimizer        -- Grid Search и генетический алгоритм оптимизации
     walk_forward     -- Walk-Forward Analysis (скользящие окна IS/OOS)
+    statistics       -- защита от переоптимизации (DSR, плато, permutation)
     visualizer       -- интерактивная визуализация (Plotly)
 """
 from .base_strategy import Bar, BaseStrategy
@@ -37,6 +38,16 @@ from .optimizer import (
     make_backtest_objective,
 )
 from .parallel import ParallelEvaluator, default_jobs
+from .statistics import (
+    DeflatedSharpeResult,
+    PermutationTestResult,
+    deflated_sharpe_ratio,
+    expected_max_sharpe,
+    permutation_test,
+    permute_bars,
+    probabilistic_sharpe_ratio,
+    select_plateau_params,
+)
 from .walk_forward import (
     WalkForwardConfig,
     WalkForwardResult,
@@ -75,6 +86,14 @@ __all__ = [
     "make_backtest_objective",
     "ParallelEvaluator",
     "default_jobs",
+    "DeflatedSharpeResult",
+    "PermutationTestResult",
+    "deflated_sharpe_ratio",
+    "expected_max_sharpe",
+    "permutation_test",
+    "permute_bars",
+    "probabilistic_sharpe_ratio",
+    "select_plateau_params",
     "WalkForwardConfig",
     "WalkForwardResult",
     "WindowResult",

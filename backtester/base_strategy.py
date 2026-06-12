@@ -197,13 +197,17 @@ class BaseStrategy(ABC):
         self,
         size: Optional[float] = None,
         limit_price: Optional[float] = None,
+        stop_price: Optional[float] = None,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         risk_pct: Optional[float] = None,
         tag: str = "",
     ) -> "Order":
-        """Покупка. Без limit_price -- рыночный ордер (исполнение на открытии
-        следующего бара).
+        """Покупка. Тип ордера (взаимоисключающие варианты):
+            * без limit_price/stop_price -- рыночный (исполнение на открытии
+              следующего бара);
+            * limit_price -- лимитный (исполнение при касании уровня снизу);
+            * stop_price  -- buy-stop (исполнение при пробое уровня вверх).
 
         Сайзинг (взаимоисключающие варианты):
             * size       -- явный размер в единицах актива;
@@ -215,6 +219,7 @@ class BaseStrategy(ABC):
         return self.broker.buy(
             size=size,
             limit_price=limit_price,
+            stop_price=stop_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
             risk_pct=risk_pct,
@@ -225,15 +230,18 @@ class BaseStrategy(ABC):
         self,
         size: Optional[float] = None,
         limit_price: Optional[float] = None,
+        stop_price: Optional[float] = None,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         risk_pct: Optional[float] = None,
         tag: str = "",
     ) -> "Order":
-        """Продажа (открытие шорта или разворот). Семантика как у buy()."""
+        """Продажа (открытие шорта или разворот). Семантика как у buy();
+        stop_price здесь -- sell-stop (исполнение при пробое уровня вниз)."""
         return self.broker.sell(
             size=size,
             limit_price=limit_price,
+            stop_price=stop_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
             risk_pct=risk_pct,

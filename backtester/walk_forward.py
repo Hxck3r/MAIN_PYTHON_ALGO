@@ -292,6 +292,7 @@ def run_walk_forward(
     generations: int = 15,
     seed: int = 42,
     n_jobs: int = 1,
+    warmup_bars: int = 0,
     progress_callback: Optional[ProgressCallback] = None,
     status_callback: Optional[StatusCallback] = None,
 ) -> WalkForwardResult:
@@ -302,11 +303,20 @@ def run_walk_forward(
     OOS-прогоны компаундируются: капитал окна = финальная эквити
     предыдущего окна, поэтому сшитая кривая непрерывна по капиталу.
 
+    warmup_bars: сколько баров ПЕРЕД началом OOS подать в прогон для
+    прогрева индикаторов (торговля на них запрещена, эквити и сделки
+    считаются только внутри OOS). Без прогрева первые ~период индикатора
+    баров каждого OOS-окна стратегия не торгует -- при коротких окнах это
+    систематически искажает OOS-результаты. Разумное значение -- максимум
+    из периодов индикаторов стратегии (с запасом).
+
     n_jobs: число процессов для параллельной оптимизации
     (0 -> авто: ядра - 1; 1 -> без параллельности).
     Остальные параметры аналогичны make_backtest_objective
     + WalkForwardConfig.
     """
+    if warmup_bars < 0:
+        raise ValueError("warmup_bars не может быть отрицательным")
     if not grid:
         raise ValueError("Пустая сетка параметров: нечего оптимизировать")
     bounds = window_bounds(config)
@@ -413,15 +423,23 @@ def run_walk_forward(
                 ).run()
                 is_stats = is_result.stats()
 
-                # Компаундинг: OOS стартует с капитала конца предыдущего окна
+                # Компаундинг: OOS стартует с капитала конца предыдущего окна.
+                # Прогрев: в прогон подаётся хвост IS (warmup_bars баров),
+                # на котором торговля запрещена, -- индикаторы к началу OOS
+                # уже прогреты; эквити обрезается до чистого OOS.
                 oos_kwargs = {**kwargs, "cash": running_cash}
+                oos_pos = int(data.index.searchsorted(oos_start))
+                warm_pos = max(oos_pos - warmup_bars, 0)
+                actual_warmup = oos_pos - warm_pos
+                run_df = data.iloc[warm_pos : oos_pos + len(oos_df)]
                 oos_result = BacktestEngine(
-                    data=oos_df, strategy_cls=strategy_cls,
-                    strategy_params=params, **oos_kwargs,
+                    data=run_df, strategy_cls=strategy_cls,
+                    strategy_params=params, warmup_bars=actual_warmup,
+                    **oos_kwargs,
                 ).run()
-                oos_stats = oos_result.stats()
-                oos_equity = oos_result.equity_curve
+                oos_equity = oos_result.equity_curve.iloc[actual_warmup:]
                 oos_trades = oos_result.trades_df()
+                oos_stats = compute_metrics(oos_equity, oos_trades)
                 running_cash = float(oos_equity.iloc[-1])
             else:
                 # Параметры не нашлись (всё отфильтровано min_trades) --

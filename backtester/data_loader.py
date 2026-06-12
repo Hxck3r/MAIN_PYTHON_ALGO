@@ -196,7 +196,12 @@ class DataLoader:
         missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
         if missing:
             raise ValueError(f"В данных отсутствуют обязательные колонки: {missing}")
-        return df[list(REQUIRED_COLUMNS)].astype(np.float64)
+        # Спред (экспорт MT5, в пунктах) сохраняем как опциональную колонку:
+        # из него можно оценить spread_pct для модели исполнения движка
+        keep = list(REQUIRED_COLUMNS)
+        if "spread" in df.columns:
+            keep.append("spread")
+        return df[keep].astype(np.float64)
 
     @staticmethod
     def _clean(
@@ -222,6 +227,8 @@ class DataLoader:
                 df = df.ffill()
                 report.issues.append("пропуски заполнены методом forward-fill")
         df["volume"] = df["volume"].fillna(0.0)
+        if "spread" in df.columns:
+            df["spread"] = df["spread"].fillna(0.0)
 
         if validate_ohlc:
             invalid = (
