@@ -94,8 +94,26 @@ class WfaSummaryTable(QTableWidget):
         wfe_text = (
             f"{result.wfe_pct:.1f} %" if math.isfinite(result.wfe_pct) else "n/a"
         )
+        retention_text = (
+            f"{result.metric_retention_pct:.0f} %"
+            if math.isfinite(result.metric_retention_pct) else "n/a"
+        )
+        tstat_text = (
+            f"{result.oos_return_tstat:.2f}"
+            if math.isfinite(result.oos_return_tstat) else "n/a"
+        )
+        corr_text = (
+            f"{result.is_oos_rank_corr:+.2f}"
+            if math.isfinite(result.is_oos_rank_corr) else "n/a"
+        )
+        plateau_text = (
+            f"{result.avg_plateau_pct:.0f} %"
+            if math.isfinite(result.avg_plateau_pct) else "n/a"
+        )
         rows: list[tuple[str, str, Optional[str]]] = [
             ("Walk-Forward Efficiency", wfe_text, _wfe_color(result.wfe_pct)),
+            (f"Удержание критерия IS→OOS", retention_text,
+             _wfe_color(result.metric_retention_pct)),
             ("Окон (валидных / всего)",
              f"{sum(1 for w in result.windows if w.valid)} / {result.n_windows}",
              None),
@@ -103,6 +121,17 @@ class WfaSummaryTable(QTableWidget):
             ("Прибыльных окон",
              f"{result.pct_profitable_windows:.0f} %",
              COLOR_GOOD if result.pct_profitable_windows >= 60 else COLOR_WARN),
+            ("Макс. серия убыточных окон",
+             str(result.max_consecutive_losing_windows), None),
+            ("t-стат OOS-доходностей", tstat_text,
+             COLOR_GOOD if math.isfinite(result.oos_return_tstat)
+             and result.oos_return_tstat >= 2 else COLOR_WARN),
+            ("Spearman IS↔OOS (ранг)", corr_text,
+             COLOR_GOOD if math.isfinite(result.is_oos_rank_corr)
+             and result.is_oos_rank_corr > 0 else COLOR_BAD),
+            ("Плато оптимума (соседи)", plateau_text,
+             COLOR_GOOD if math.isfinite(result.avg_plateau_pct)
+             and result.avg_plateau_pct >= 50 else COLOR_WARN),
             ("Разброс OOS-доходностей (std)",
              f"{result.consistency_std:.2f} %", None),
             ("OOS доходность (сшитая)", f"{stats.total_return_pct:.2f} %", None),
@@ -113,10 +142,42 @@ class WfaSummaryTable(QTableWidget):
             ("OOS профит-фактор", f"{stats.profit_factor:.2f}", None),
             ("OOS сделок всего", str(stats.total_trades), None),
         ]
+
+        # --- Выбор параметров: консенсус, частота, лучшие окна ------------- #
+        modal, modal_cnt, modal_pct = result.modal_param_set()
+        n_valid = len(result.valid_windows)
+        if modal:
+            rows.append(("— Параметры —", "", None))
+            rows.append((
+                "Консенсус (мода)",
+                result._fmt_params(result.consensus_params()), COLOR_GOOD,
+            ))
+            rows.append((
+                "Самый частый набор",
+                f"{result._fmt_params(modal)}  ({modal_cnt}/{n_valid}, "
+                f"{modal_pct:.0f} %)",
+                COLOR_GOOD if modal_pct >= 50 else COLOR_WARN,
+            ))
+            best_is = result.best_is_window()
+            best_oos = result.best_oos_window()
+            if best_is is not None:
+                rows.append((
+                    f"Лучшее окно на IS (#{best_is.index})",
+                    result._fmt_params(best_is.best_params), None,
+                ))
+            if best_oos is not None:
+                rows.append((
+                    f"Лучшее окно на OOS (#{best_oos.index})",
+                    result._fmt_params(best_oos.best_params), None,
+                ))
+
         for name, cv in result.param_stability.items():
             cv_text = f"{cv:.1f} %" if math.isfinite(cv) else "n/a"
             color = COLOR_GOOD if math.isfinite(cv) and cv <= 30 else COLOR_WARN
             rows.append((f"Стабильность «{name}» (CV)", cv_text, color))
+
+        for name, where in result.param_edge_warnings().items():
+            rows.append((f"⚠ «{name}» на границе", where, COLOR_BAD))
 
         self.setRowCount(len(rows))
         for row, (name, value, color) in enumerate(rows):
@@ -124,6 +185,7 @@ class WfaSummaryTable(QTableWidget):
             name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             value_item = QTableWidgetItem(value)
             value_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            value_item.setToolTip(value)   # полный текст набора параметров по ховеру
             if color:
                 value_item.setForeground(QColor(color))
             self.setItem(row, 0, name_item)

@@ -4,7 +4,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import math
+
+import numpy as np
+
 from backtester import WalkForwardConfig, run_walk_forward, window_bounds
+from backtester.walk_forward import _spearman, _window_plateau_pct
 from strategies import SmaCrossStrategy
 
 GRID = {"fast_period": [5, 10], "slow_period": [20]}
@@ -78,3 +83,53 @@ def test_warmup_zero_matches_old_behavior(synth_1h):
         warmup_bars=0,
     )
     pd.testing.assert_series_equal(a.stitched_equity, b.stitched_equity)
+
+
+# --- Spearman -------------------------------------------------------------- #
+def test_spearman_monotonic_and_ties():
+    # строго возрастающая связь -> +1, обратная -> -1
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    assert _spearman(x, x * 2 + 1) == pytest.approx(1.0)
+    assert _spearman(x, -x) == pytest.approx(-1.0)
+    # совпадения значений (средние ранги) не ломают расчёт
+    assert _spearman(np.array([1.0, 1.0, 2.0, 3.0]),
+                     np.array([1.0, 2.0, 2.0, 3.0])) == pytest.approx(0.9, abs=0.2)
+
+
+def test_spearman_needs_three_points():
+    assert math.isnan(_spearman(np.array([1.0, 2.0]), np.array([1.0, 2.0])))
+    # нет разброса -> неопределено
+    assert math.isnan(_spearman(np.array([1.0, 1.0, 1.0]), np.array([1.0, 2.0, 3.0])))
+
+
+# --- Plateau --------------------------------------------------------------- #
+def test_plateau_flat_vs_spike():
+    grid = {"a": [1, 2, 3]}
+    # плато: соседи оптимума почти так же хороши -> 100%
+    flat = {(("a", 2),): 1.0, (("a", 1),): 0.95, (("a", 3),): 0.9}
+    assert _window_plateau_pct(flat, {"a": 2}, grid) == pytest.approx(100.0)
+    # изолированный пик: соседи рушатся -> 0%
+    spike = {(("a", 2),): 1.0, (("a", 1),): 0.1, (("a", 3),): 0.1}
+    assert _window_plateau_pct(spike, {"a": 2}, grid) == pytest.approx(0.0)
+
+
+def test_plateau_nan_without_neighbors():
+    # сетку никто не покрыл соседями -> NaN
+    grid = {"a": [1, 2, 3]}
+    assert math.isnan(_window_plateau_pct({(("a", 2),): 1.0}, {"a": 2}, grid))
+
+
+def test_wfa_result_has_robustness_metrics(synth_1h):
+    result = run_walk_forward(
+        data=synth_1h, strategy_cls=SmaCrossStrategy,
+        config=_config(), grid={"fast_period": [5, 10, 15], "slow_period": [20, 30]},
+        metric="sharpe_ratio", min_trades=0,
+    )
+    # поля присутствуют и имеют корректный тип/диапазон
+    assert isinstance(result.is_oos_rank_corr, float)
+    if math.isfinite(result.is_oos_rank_corr):
+        assert -1.0 <= result.is_oos_rank_corr <= 1.0
+    if math.isfinite(result.avg_plateau_pct):
+        assert 0.0 <= result.avg_plateau_pct <= 100.0
+    # текстовый отчёт по параметрам не падает
+    assert "Spearman" in result.param_report()

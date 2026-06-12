@@ -143,12 +143,17 @@ class WindowResult:
     oos_bars: int
     best_params: dict[str, Any]
     is_score: float                         # лучший score критерия на IS
+    oos_score: float                        # тот же критерий, но на OOS
     is_stats: PerformanceMetrics            # бэктест IS с лучшими параметрами
     oos_stats: PerformanceMetrics
     oos_equity: pd.Series
     oos_trades: pd.DataFrame
     efficiency: float                       # WFE окна, %; NaN если IS <= 0
     valid: bool                             # нашлись ли валидные параметры
+    # IS-score каждой испытанной комбинации: ключ -- tuple(sorted(params.items())).
+    # Нужен для plateau-check (оценка окрестности оптимума). Для GA покрытие
+    # сетки разреженное, поэтому plateau считается в основном для grid search.
+    is_scores: dict[tuple, float] = field(default_factory=dict)
 
     @property
     def is_days(self) -> float:
@@ -174,10 +179,120 @@ class WalkForwardResult:
     param_stability: dict[str, float]       # параметр -> коэф. вариации, %
     metric: str = ""                        # имя критерия оптимизации
     skipped_windows: int = 0                # окон пропущено (мало баров)
+    grid: dict[str, list] = field(default_factory=dict)  # исходная сетка поиска
+    metric_retention_pct: float = math.nan  # медиана OOS-крит. / IS-крит., %
+    oos_return_tstat: float = math.nan       # t-стат OOS-доходностей окон (> 0?)
+    max_consecutive_losing_windows: int = 0  # самая длинная серия убыточных окон
+    is_oos_rank_corr: float = math.nan       # Spearman is_score vs oos_score
+    avg_plateau_pct: float = math.nan        # средняя «ширина плато» оптимума, %
 
     @property
     def n_windows(self) -> int:
         return len(self.windows)
+
+    @property
+    def valid_windows(self) -> list[WindowResult]:
+        return [w for w in self.windows if w.valid]
+
+    # -- Выбор параметров: частота и «лучшие» окна --------------------------- #
+    def param_usage(self) -> dict[str, list[tuple[Any, int, float]]]:
+        """Частота выбора значений каждого параметра по валидным окнам.
+
+        Для каждого параметра -- список (значение, число_окон, доля_%),
+        отсортированный по убыванию частоты. Показывает, на каких значениях
+        оптимизатор «останавливается» чаще всего: устойчивый параметр имеет
+        ярко выраженную моду, шумный -- размазан по всему диапазону.
+        """
+        valid = self.valid_windows
+        usage: dict[str, list[tuple[Any, int, float]]] = {}
+        if not valid:
+            return usage
+        names = sorted({name for w in valid for name in w.best_params})
+        for name in names:
+            counts: dict[Any, int] = {}
+            present = 0
+            for w in valid:
+                if name in w.best_params:
+                    counts[w.best_params[name]] = counts.get(w.best_params[name], 0) + 1
+                    present += 1
+            ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            usage[name] = [
+                (val, cnt, cnt / present * 100.0) for val, cnt in ranked
+            ]
+        return usage
+
+    def consensus_params(self) -> dict[str, Any]:
+        """Самое частое (модальное) значение каждого параметра по окнам.
+
+        Покомпонентная мода -- консервативный кандидат на «боевые» параметры:
+        она устойчива к выбросам отдельных окон. См. также modal_param_set()
+        для самого частого *целого* набора.
+        """
+        return {name: usage[0][0] for name, usage in self.param_usage().items()}
+
+    def modal_param_set(self) -> tuple[dict[str, Any], int, float]:
+        """Самый частый *целый* набор параметров: (набор, число_окон, доля_%).
+
+        В отличие от покомпонентной consensus_params(), это реально
+        встречавшаяся в WFA комбинация -- её OOS-поведение уже наблюдалось.
+        """
+        valid = self.valid_windows
+        if not valid:
+            return {}, 0, 0.0
+        counts: dict[tuple, int] = {}
+        for w in valid:
+            key = tuple(sorted(w.best_params.items()))
+            counts[key] = counts.get(key, 0) + 1
+        best_key, best_cnt = max(counts.items(), key=lambda kv: kv[1])
+        return dict(best_key), best_cnt, best_cnt / len(valid) * 100.0
+
+    def best_is_window(self) -> Optional[WindowResult]:
+        """Окно с лучшим значением критерия на IS (наиболее «выгодная» подгонка)."""
+        valid = [w for w in self.valid_windows if math.isfinite(w.is_score)]
+        return max(valid, key=lambda w: w.is_score) if valid else None
+
+    def best_oos_window(self) -> Optional[WindowResult]:
+        """Окно с лучшим значением критерия на OOS (лучшее на новых данных)."""
+        valid = [w for w in self.valid_windows if math.isfinite(w.oos_score)]
+        return max(valid, key=lambda w: w.oos_score) if valid else None
+
+    def plateau_per_window(self) -> dict[int, float]:
+        """Ширина плато оптимума в каждом валидном окне: {номер_окна -> %}.
+
+        См. _window_plateau_pct: высокий % -- соседи оптимума по сетке почти
+        так же хороши (робастно), низкий -- изолированный пик (переподгонка).
+        """
+        result: dict[int, float] = {}
+        for w in self.valid_windows:
+            pct = _window_plateau_pct(w.is_scores, w.best_params, self.grid)
+            if math.isfinite(pct):
+                result[w.index] = pct
+        return result
+
+    def param_edge_warnings(self) -> dict[str, str]:
+        """Параметры, чья мода упирается в границу сетки поиска.
+
+        Если оптимум систематически садится на минимум/максимум диапазона,
+        истинный оптимум, вероятно, лежит ЗА пределами сетки -- диапазон
+        стоит расширить, иначе WFA оценивает заведомо урезанную стратегию.
+        """
+        warnings: dict[str, str] = {}
+        if not self.grid:
+            return warnings
+        consensus = self.consensus_params()
+        for name, value in consensus.items():
+            values = self.grid.get(name)
+            if not values:
+                continue
+            try:
+                lo, hi = min(values), max(values)
+            except TypeError:            # категориальные значения -- границ нет
+                continue
+            if value == lo and lo != hi:
+                warnings[name] = f"на нижней границе сетки ({lo})"
+            elif value == hi and lo != hi:
+                warnings[name] = f"на верхней границе сетки ({hi})"
+        return warnings
 
     def summary_df(self) -> pd.DataFrame:
         """По строке на окно: даты, параметры, IS/OOS результаты."""
@@ -201,16 +316,123 @@ class WalkForwardResult:
             rows.append(row)
         return pd.DataFrame(rows)
 
+    @staticmethod
+    def _fmt_params(params: dict[str, Any]) -> str:
+        """Компактная запись набора параметров: a=5, b=1.50."""
+        if not params:
+            return "—"
+        parts = []
+        for k, v in sorted(params.items()):
+            parts.append(f"{k}={v:g}" if isinstance(v, float) else f"{k}={v}")
+        return ", ".join(parts)
+
+    def param_report(self) -> str:
+        """Текстовый разбор выбора параметров: частота, консенсус, лучшие окна.
+
+        Отвечает на главный практический вопрос WFA: «какие параметры брать
+        в бой и насколько уверенно их выбирал оптимизатор».
+        """
+        valid = self.valid_windows
+        lines = ["=== Параметры по окнам ==="]
+        if not valid:
+            lines.append("Нет валидных окон — оптимизатор ничего не выбрал.")
+            return "\n".join(lines)
+
+        # Частота выбора значений каждого параметра
+        for name, usage in self.param_usage().items():
+            shown = ", ".join(
+                f"{val:g}×{cnt} ({pct:.0f}%)" if isinstance(val, float)
+                else f"{val}×{cnt} ({pct:.0f}%)"
+                for val, cnt, pct in usage[:5]
+            )
+            tail = " …" if len(usage) > 5 else ""
+            cv = self.param_stability.get(name)
+            cv_txt = (
+                f"  CV={cv:.0f}%" if cv is not None and math.isfinite(cv) else ""
+            )
+            lines.append(f"  {name}: {shown}{tail}{cv_txt}")
+
+        # Покомпонентный консенсус и самый частый целый набор
+        lines.append("")
+        lines.append(f"Консенсус (мода по параметрам): {self._fmt_params(self.consensus_params())}")
+        modal, cnt, pct = self.modal_param_set()
+        lines.append(
+            f"Самый частый набор: {self._fmt_params(modal)} "
+            f"— {cnt}/{len(valid)} окон ({pct:.0f}%)"
+        )
+
+        # Лучшие окна на IS и OOS — видно расхождение «подгонка vs реальность»
+        bi, bo = self.best_is_window(), self.best_oos_window()
+        if bi is not None:
+            lines.append(
+                f"Лучшее окно на IS:  #{bi.index} {self.metric}={bi.is_score:.3f} "
+                f"→ OOS={bi.oos_score:.3f}  [{self._fmt_params(bi.best_params)}]"
+            )
+        if bo is not None:
+            lines.append(
+                f"Лучшее окно на OOS: #{bo.index} {self.metric}={bo.oos_score:.3f} "
+                f"(на IS={bo.is_score:.3f})  [{self._fmt_params(bo.best_params)}]"
+            )
+
+        # Робастность оптимума: предсказуемость IS→OOS и ширина плато
+        lines.append("")
+        corr_txt = (
+            f"{self.is_oos_rank_corr:+.2f}"
+            if math.isfinite(self.is_oos_rank_corr) else "n/a"
+        )
+        lines.append(
+            f"Spearman IS↔OOS (предсказуемость ранга): {corr_txt}  "
+            f"(>0 — IS-лучшее переносится на OOS; ≤0 — ранжируется шум)"
+        )
+        plateau_txt = (
+            f"{self.avg_plateau_pct:.0f}%"
+            if math.isfinite(self.avg_plateau_pct) else "n/a"
+        )
+        lines.append(
+            f"Плато оптимума (соседи по сетке ≈ лучшего): {plateau_txt}  "
+            f"(высоко — робастно; низко — изолированный пик/переподгонка)"
+        )
+
+        # Предупреждения о параметрах на границе сетки
+        edges = self.param_edge_warnings()
+        if edges:
+            lines.append("")
+            lines.append("⚠ Параметры на границе сетки (расширьте диапазон):")
+            for name, where in edges.items():
+                lines.append(f"  {name}: {where}")
+        return "\n".join(lines)
+
     def __str__(self) -> str:
         wfe = "n/a" if math.isnan(self.wfe_pct) else f"{self.wfe_pct:.1f}%"
+        retention = (
+            "n/a" if math.isnan(self.metric_retention_pct)
+            else f"{self.metric_retention_pct:.0f}%"
+        )
+        tstat = (
+            "n/a" if math.isnan(self.oos_return_tstat)
+            else f"{self.oos_return_tstat:.2f}"
+        )
+        corr = (
+            "n/a" if math.isnan(self.is_oos_rank_corr)
+            else f"{self.is_oos_rank_corr:+.2f}"
+        )
+        plateau = (
+            "n/a" if math.isnan(self.avg_plateau_pct)
+            else f"{self.avg_plateau_pct:.0f}%"
+        )
+        modal, cnt, pct = self.modal_param_set()
         return (
             f"=== Walk-Forward Analysis ===\n"
             f"Окон: {self.n_windows} (пропущено {self.skipped_windows})\n"
-            f"WFE: {wfe}\n"
-            f"Прибыльных окон: {self.pct_profitable_windows:.0f}%\n"
+            f"WFE: {wfe}  |  удержание критерия IS→OOS: {retention}\n"
+            f"Прибыльных окон: {self.pct_profitable_windows:.0f}%  "
+            f"(макс. серия убыточных подряд: {self.max_consecutive_losing_windows})\n"
+            f"t-стат OOS-доходностей окон: {tstat}\n"
+            f"Spearman IS↔OOS: {corr}  |  плато оптимума: {plateau}\n"
             f"OOS доходность: {self.oos_stats.total_return_pct:.2f}%\n"
             f"OOS Sharpe: {self.oos_stats.sharpe_ratio:.2f}, "
-            f"MaxDD: {self.oos_stats.max_drawdown_pct:.2f}%"
+            f"MaxDD: {self.oos_stats.max_drawdown_pct:.2f}%\n"
+            f"Самый частый набор: {self._fmt_params(modal)} ({pct:.0f}% окон)"
         )
 
 
@@ -273,6 +495,89 @@ def _param_stability(windows: list[WindowResult]) -> dict[str, float]:
             if abs(mean) > 1e-12 else math.nan
         )
     return stability
+
+
+def _rankdata(values: np.ndarray) -> np.ndarray:
+    """Ранги значений (1..N) со средним рангом для совпадений (как у SciPy)."""
+    arr = np.asarray(values, dtype=float)
+    sorter = np.argsort(arr, kind="mergesort")
+    inv = np.empty(len(arr), dtype=int)
+    inv[sorter] = np.arange(len(arr))
+    arr_sorted = arr[sorter]
+    obs = np.r_[True, arr_sorted[1:] != arr_sorted[:-1]]
+    dense = obs.cumsum()[inv]
+    counts = np.r_[np.nonzero(obs)[0], len(arr)]
+    return 0.5 * (counts[dense] + counts[dense - 1] + 1)
+
+
+def _spearman(x: np.ndarray, y: np.ndarray) -> float:
+    """Ранговая корреляция Спирмена (без SciPy). NaN, если данных < 3."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x, y = x[mask], y[mask]
+    if len(x) < 3:
+        return math.nan
+    rx, ry = _rankdata(x), _rankdata(y)
+    rx = rx - rx.mean()
+    ry = ry - ry.mean()
+    denom = math.sqrt(float((rx * rx).sum()) * float((ry * ry).sum()))
+    if denom <= 1e-12:           # нет разброса рангов (все значения равны)
+        return math.nan
+    return float((rx * ry).sum() / denom)
+
+
+def _window_plateau_pct(
+    is_scores: dict[tuple, float],
+    best_params: dict[str, Any],
+    grid: dict[str, list],
+    tol: float = 0.2,
+) -> float:
+    """Доля соседей оптимума по сетке, сохранивших ~уровень лучшего score, %.
+
+    Берутся непосредственные соседи лучшей точки по каждой оси сетки
+    (на один шаг влево/вправо) и считается, у скольких из них IS-score
+    остаётся в пределах tol от лучшего (>= best - tol*|best|).
+
+    100% -- оптимум на широком плато (соседи почти так же хороши, параметры
+    робастны); низкое значение -- изолированный пик (рядом всё рушится),
+    типичный признак переподгонки под конкретный прогон. NaN -- соседей не
+    нашлось (например, GA не покрыл сетку плотно).
+    """
+    if not is_scores or not best_params:
+        return math.nan
+    best_key = tuple(sorted(best_params.items()))
+    best = is_scores.get(best_key)
+    if best is None or not math.isfinite(best):
+        return math.nan
+
+    axes: dict[str, list] = {}
+    for name in best_params:
+        values = grid.get(name)
+        if not values:
+            continue
+        try:
+            axes[name] = sorted(set(values))
+        except TypeError:        # категориальные значения -- «соседство» не задано
+            continue
+
+    neighbor_scores: list[float] = []
+    for name, axis in axes.items():
+        if best_params[name] not in axis:
+            continue
+        i = axis.index(best_params[name])
+        for j in (i - 1, i + 1):
+            if 0 <= j < len(axis):
+                neighbour = dict(best_params)
+                neighbour[name] = axis[j]
+                score = is_scores.get(tuple(sorted(neighbour.items())))
+                if score is not None:
+                    neighbor_scores.append(score)
+    if not neighbor_scores:
+        return math.nan
+    threshold = best - tol * abs(best)
+    good = sum(1 for s in neighbor_scores if math.isfinite(s) and s >= threshold)
+    return good / len(neighbor_scores) * 100.0
 
 
 # ---------------------------------------------------------------------- #
@@ -454,6 +759,15 @@ def run_walk_forward(
                 oos_stats.total_return_pct, len(oos_df),
             ) if valid else math.nan
 
+            oos_score = (
+                float(getattr(oos_stats, metric, math.nan)) if valid else math.nan
+            )
+            # score каждой испытанной комбинации (для plateau-check); при
+            # совпадении геномов в GA берём первый
+            is_scores: dict[tuple, float] = {}
+            for params_i, score_i in opt.history:
+                key = tuple(sorted(params_i.items()))
+                is_scores.setdefault(key, float(score_i))
             windows.append(WindowResult(
                 index=len(windows) + 1,
                 is_start=is_start, is_end=is_end,
@@ -461,9 +775,11 @@ def run_walk_forward(
                 is_bars=len(is_df), oos_bars=len(oos_df),
                 best_params=dict(opt.best_params) if valid else {},
                 is_score=opt.best_score if valid else math.nan,
+                oos_score=oos_score,
                 is_stats=is_stats, oos_stats=oos_stats,
                 oos_equity=oos_equity, oos_trades=oos_trades,
                 efficiency=efficiency, valid=valid,
+                is_scores=is_scores if valid else {},
             ))
             equity_parts.append(oos_equity)
             if not oos_trades.empty:
@@ -510,8 +826,60 @@ def run_walk_forward(
             [w.oos_stats.total_return_pct for w in valid_windows], dtype=float
         )
         consistency = float(returns.std(ddof=1)) if len(returns) > 1 else 0.0
+
+        # Удержание критерия IS->OOS: насколько просел сам оптимизируемый
+        # критерий на новых данных (медианой -- устойчиво к выбросам окон).
+        is_scores = np.array(
+            [w.is_score for w in valid_windows if math.isfinite(w.is_score)],
+            dtype=float,
+        )
+        oos_scores = np.array(
+            [w.oos_score for w in valid_windows if math.isfinite(w.oos_score)],
+            dtype=float,
+        )
+        med_is = float(np.median(is_scores)) if len(is_scores) else math.nan
+        med_oos = float(np.median(oos_scores)) if len(oos_scores) else math.nan
+        retention = (
+            med_oos / med_is * 100.0
+            if math.isfinite(med_is) and abs(med_is) > 1e-12 else math.nan
+        )
+
+        # t-стат OOS-доходностей окон: значимо ли среднее OOS > 0 (есть ли
+        # вообще статистическое преимущество, а не везение пары окон).
+        if len(returns) > 1 and returns.std(ddof=1) > 1e-12:
+            tstat = float(
+                returns.mean() / (returns.std(ddof=1) / math.sqrt(len(returns)))
+            )
+        else:
+            tstat = math.nan
+
+        # Самая длинная серия убыточных OOS-окон подряд (выживаемость капитала)
+        max_losing = streak = 0
+        for w in valid_windows:
+            streak = streak + 1 if w.oos_stats.net_profit <= 0 else 0
+            max_losing = max(max_losing, streak)
+
+        # Spearman is_score vs oos_score: предсказывает ли ранг на IS ранг на
+        # OOS. ~0/отрицательно -> оптимизация ранжирует шум, IS-«лучшее» не
+        # переносится на новые данные.
+        rank_corr = _spearman(
+            np.array([w.is_score for w in valid_windows], dtype=float),
+            np.array([w.oos_score for w in valid_windows], dtype=float),
+        )
+
+        # Plateau-check: средняя «ширина плато» оптимума по окнам. Изолированные
+        # пики IS-оптимума (низкое плато) -- признак переподгонки.
+        plateaus = [
+            p for p in (
+                _window_plateau_pct(w.is_scores, w.best_params, grid)
+                for w in valid_windows
+            ) if math.isfinite(p)
+        ]
+        avg_plateau = float(np.mean(plateaus)) if plateaus else math.nan
     else:
         wfe, profitable, consistency = math.nan, 0.0, 0.0
+        retention, tstat, max_losing = math.nan, math.nan, 0
+        rank_corr, avg_plateau = math.nan, math.nan
 
     status("Walk-Forward завершён")
     return WalkForwardResult(
@@ -526,4 +894,10 @@ def run_walk_forward(
         param_stability=_param_stability(windows),
         metric=metric,
         skipped_windows=skipped,
+        grid=dict(grid),
+        metric_retention_pct=retention,
+        oos_return_tstat=tstat,
+        max_consecutive_losing_windows=max_losing,
+        is_oos_rank_corr=rank_corr,
+        avg_plateau_pct=avg_plateau,
     )
