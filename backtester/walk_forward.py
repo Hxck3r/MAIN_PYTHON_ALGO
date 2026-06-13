@@ -36,7 +36,7 @@ import pandas as pd
 if TYPE_CHECKING:  # только для аннотаций -- без циклического импорта
     from .statistics import DeflatedSharpeResult
 
-from .backtest_engine import BacktestEngine
+from .backtest_engine import run_backtest
 from .base_strategy import BaseStrategy
 from .metrics import PerformanceMetrics, compute_metrics
 from .optimizer import (
@@ -737,10 +737,10 @@ def run_walk_forward(
             if valid:
                 status(f"Окно {k + 1}/{len(bounds)}: прогон OOS")
                 params = {**fixed, **opt.best_params}
-                is_result = BacktestEngine(
+                is_result = run_backtest(
                     data=is_df, strategy_cls=strategy_cls,
                     strategy_params=params, **kwargs,
-                ).run()
+                )
                 is_stats = is_result.stats()
 
                 # Компаундинг: OOS стартует с капитала конца предыдущего окна.
@@ -752,11 +752,11 @@ def run_walk_forward(
                 warm_pos = max(oos_pos - warmup_bars, 0)
                 actual_warmup = oos_pos - warm_pos
                 run_df = data.iloc[warm_pos : oos_pos + len(oos_df)]
-                oos_result = BacktestEngine(
+                oos_result = run_backtest(
                     data=run_df, strategy_cls=strategy_cls,
                     strategy_params=params, warmup_bars=actual_warmup,
                     **oos_kwargs,
-                ).run()
+                )
                 oos_equity = oos_result.equity_curve.iloc[actual_warmup:]
                 oos_trades = oos_result.trades_df()
                 oos_stats = compute_metrics(oos_equity, oos_trades)

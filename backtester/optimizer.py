@@ -24,8 +24,9 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence, T
 
 import pandas as pd
 
-from .backtest_engine import BacktestEngine
+from .backtest_engine import run_backtest
 from .base_strategy import BaseStrategy
+from .metrics import compute_optimization_metric, metric_needs_trades
 
 if TYPE_CHECKING:  # только для аннотаций -- без циклического импорта
     from .statistics import DeflatedSharpeResult
@@ -412,19 +413,22 @@ def make_backtest_objective(
     """
     fixed = dict(fixed_params or {})
     kwargs = dict(engine_kwargs or {})
+    needs_trades = metric_needs_trades(metric)
 
     def objective(params: dict[str, Any]) -> float:
-        engine = BacktestEngine(
+        result = run_backtest(
             data=data,
             strategy_cls=strategy_cls,
             strategy_params={**fixed, **params},
             **kwargs,
         )
-        result = engine.run()
-        stats = result.stats()
-        if stats.total_trades < min_trades:
+        # Фильтр min_trades до расчёта метрик: «пустые» прогоны отсекаются
+        # сразу, без сборки trades_df и подсчёта статистики.
+        if len(result.trades) < min_trades:
             return -math.inf
-        value = getattr(stats, metric)
-        return float(value)
+        # trades_df строим только для метрик уровня сделок -- для Sharpe и
+        # прочих «эквити-метрик» он не нужен вовсе.
+        trades_df = result.trades_df() if needs_trades else None
+        return compute_optimization_metric(result.equity_curve, trades_df, metric)
 
     return objective

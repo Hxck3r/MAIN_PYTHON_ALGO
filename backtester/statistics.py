@@ -35,7 +35,7 @@ from typing import Any, Callable, Optional, Type
 import numpy as np
 import pandas as pd
 
-from .backtest_engine import BacktestEngine
+from .backtest_engine import run_backtest
 from .base_strategy import BaseStrategy
 
 _EULER_GAMMA = 0.5772156649015329
@@ -214,13 +214,12 @@ def deflated_sharpe_from_optimization(
     Sharpe найденного прогона (с поправкой на размер перебора), поэтому
     n_trials должен быть числом реально оценённых комбинаций.
     """
-    engine = BacktestEngine(
+    result = run_backtest(
         data=data,
         strategy_cls=strategy_cls,
         strategy_params={**(fixed_params or {}), **best_params},
         **(engine_kwargs or {}),
     )
-    result = engine.run()
     returns = result.equity_curve.pct_change().dropna().to_numpy(dtype=np.float64)
     # trial_scores не влияют на расчёт (нужен лишь счётчик испытаний) --
     # число перебранных комбинаций передаём явно через n_trials.
@@ -378,9 +377,9 @@ def permutation_test(
     rng = np.random.default_rng(seed)
 
     def run_once(df: pd.DataFrame) -> float:
-        result = BacktestEngine(
+        result = run_backtest(
             data=df, strategy_cls=strategy_cls, strategy_params=params, **kwargs
-        ).run()
+        )
         return float(getattr(result.stats(), metric))
 
     original = run_once(data)

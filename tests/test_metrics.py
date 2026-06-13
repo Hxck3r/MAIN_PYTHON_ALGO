@@ -5,12 +5,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from backtester.backtest_engine import BacktestEngine
 from backtester.metrics import (
+    CRITERIA,
     compute_metrics,
+    compute_optimization_metric,
     exposure_pct,
     max_drawdown_info,
+    metric_needs_trades,
     sharpe_ratio,
 )
+from strategies.sma_cross import SmaCrossStrategy
 
 
 def _equity(values: list[float]) -> pd.Series:
@@ -63,3 +68,28 @@ def test_compute_metrics_empty_equity():
     m = compute_metrics(pd.Series(dtype=np.float64), pd.DataFrame())
     assert m.total_trades == 0
     assert m.exposure_pct == 0.0
+
+
+@pytest.mark.parametrize("metric", sorted(set(CRITERIA.values())))
+def test_optimization_metric_matches_full_metrics(synth_1h, metric):
+    """Лёгкий путь оптимизатора численно совпадает с полным compute_metrics."""
+    result = BacktestEngine(
+        data=synth_1h,
+        strategy_cls=SmaCrossStrategy,
+        strategy_params={"fast_period": 10, "slow_period": 40},
+        commission_pct=0.0005,
+    ).run()
+    trades_df = result.trades_df()
+    full = getattr(result.stats(), metric)
+    fast = compute_optimization_metric(
+        result.equity_curve,
+        trades_df if metric_needs_trades(metric) else None,
+        metric,
+    )
+    assert fast == pytest.approx(full, rel=1e-9, abs=1e-9)
+
+
+def test_optimization_metric_empty_equity_matches():
+    empty = pd.Series(dtype=np.float64)
+    for metric in set(CRITERIA.values()):
+        assert compute_optimization_metric(empty, pd.DataFrame(), metric) == 0.0

@@ -105,18 +105,28 @@ def _estimate_periods_per_year(index: pd.Index) -> int:
     return max(int(round((len(index) - 1) * SECONDS_PER_YEAR / span_seconds)), 1)
 
 
-def max_drawdown_info(equity: pd.Series) -> tuple[float, float, int]:
-    """Возвращает (макс. просадка в деньгах, в %, длительность в барах)."""
-    values = equity.to_numpy(dtype=np.float64)
+def max_drawdown_abs_pct(values: np.ndarray) -> tuple[float, float]:
+    """Макс. просадка в деньгах и в % (только numpy, без длительности).
+
+    Длительность просадки требует Python-цикла по всем барам и не входит ни
+    в один критерий оптимизации -- лёгкий путь её не считает.
+    """
     running_max = np.maximum.accumulate(values)
     drawdown = running_max - values
-
     dd_abs = float(drawdown.max()) if len(drawdown) else 0.0
     with np.errstate(divide="ignore", invalid="ignore"):
         dd_pct_series = np.where(running_max > 0, drawdown / running_max, 0.0)
     dd_pct = float(dd_pct_series.max() * 100.0) if len(values) else 0.0
+    return dd_abs, dd_pct
+
+
+def max_drawdown_info(equity: pd.Series) -> tuple[float, float, int]:
+    """Возвращает (макс. просадка в деньгах, в %, длительность в барах)."""
+    values = equity.to_numpy(dtype=np.float64)
+    dd_abs, dd_pct = max_drawdown_abs_pct(values)
 
     # Длительность: максимальное число баров между обновлениями максимума
+    running_max = np.maximum.accumulate(values)
     duration = 0
     current = 0
     for value, peak in zip(values, running_max):
@@ -286,3 +296,109 @@ def compute_metrics(
         # Убыточные прогоны ранжируем по доходности с штрафом за просадку
         m.complex_criterion = m.total_return_pct - m.max_drawdown_pct
     return m
+
+
+# ---------------------------------------------------------------------- #
+# Лёгкий путь для оптимизации: одно значение метрики без лишних расчётов
+# ---------------------------------------------------------------------- #
+#: метрики, которым нужна статистика по сделкам (pnl), а не только эквити
+_TRADE_LEVEL_METRICS = frozenset(
+    {"profit_factor", "win_rate_pct", "expectancy", "complex_criterion"}
+)
+#: метрики с быстрым путём; остальное считается полным compute_metrics
+_FAST_METRICS = frozenset(
+    {
+        "net_profit", "total_return_pct", "sharpe_ratio", "sortino_ratio",
+        "recovery_factor",
+    }
+    | _TRADE_LEVEL_METRICS
+)
+
+
+def metric_needs_trades(metric: str) -> bool:
+    """Нужна ли metric статистика по сделкам (для ленивой сборки trades_df)."""
+    return metric not in _FAST_METRICS or metric in _TRADE_LEVEL_METRICS
+
+
+def compute_optimization_metric(
+    equity_curve: pd.Series,
+    trades_df: Optional[pd.DataFrame],
+    metric: str,
+    risk_free_rate: float = 0.0,
+    periods_per_year: Optional[int] = None,
+) -> float:
+    """Одно значение metric для оптимизатора -- без дорогих метрик, не входящих
+    ни в один критерий (длительность просадки, серии сделок, экспозиция).
+
+    Результат численно совпадает с getattr(compute_metrics(...), metric)
+    (проверяется в tests/test_metrics.py). Для редких метрик вне быстрого
+    набора честно считается полный compute_metrics.
+
+    trades_df можно передать None, если metric не относится к сделкам
+    (metric_needs_trades(metric) == False) -- тогда DataFrame не нужен вовсе.
+    """
+    if metric not in _FAST_METRICS:
+        return float(getattr(
+            compute_metrics(equity_curve, trades_df if trades_df is not None
+                            else pd.DataFrame(), risk_free_rate, periods_per_year),
+            metric,
+        ))
+    if equity_curve.empty:
+        return 0.0  # как PerformanceMetrics() по умолчанию
+
+    initial = float(equity_curve.iloc[0])
+    final = float(equity_curve.iloc[-1])
+    net_profit = final - initial
+    total_return_pct = (final / initial - 1.0) * 100.0 if initial > 0 else 0.0
+
+    if metric == "net_profit":
+        return net_profit
+    if metric == "total_return_pct":
+        return total_return_pct
+
+    if metric in ("sharpe_ratio", "sortino_ratio"):
+        ppy = periods_per_year or _estimate_periods_per_year(equity_curve.index)
+        returns = equity_curve.pct_change().dropna().to_numpy(dtype=np.float64)
+        if metric == "sharpe_ratio":
+            return sharpe_ratio(returns, ppy, risk_free_rate)
+        return sortino_ratio(returns, ppy, risk_free_rate)
+
+    if metric == "recovery_factor":
+        dd_abs, _ = max_drawdown_abs_pct(equity_curve.to_numpy(dtype=np.float64))
+        return net_profit / dd_abs if dd_abs > 0 else 0.0
+
+    # --- метрики уровня сделок ---------------------------------------- #
+    total_trades = 0 if trades_df is None else len(trades_df)
+    if total_trades == 0:
+        if metric == "complex_criterion":
+            _, dd_pct = max_drawdown_abs_pct(equity_curve.to_numpy(dtype=np.float64))
+            return total_return_pct - dd_pct
+        return 0.0  # win_rate / profit_factor / expectancy по умолчанию
+
+    pnl = trades_df["pnl"].to_numpy(dtype=np.float64)
+    if metric == "win_rate_pct":
+        return float((pnl > 0).sum()) / total_trades * 100.0
+    if metric == "expectancy":
+        return float(pnl.mean())
+
+    gross_profit = float(pnl[pnl > 0].sum())
+    gross_loss = float(np.abs(pnl[pnl <= 0]).sum())
+    if gross_loss > 0:
+        profit_factor = gross_profit / gross_loss
+    elif gross_profit > 0:
+        profit_factor = math.inf
+    else:
+        profit_factor = 0.0
+    if metric == "profit_factor":
+        return profit_factor
+
+    # complex_criterion
+    if net_profit > 0:
+        _, dd_pct = max_drawdown_abs_pct(equity_curve.to_numpy(dtype=np.float64))
+        pf_capped = min(profit_factor, 3.0)
+        return (
+            total_return_pct * pf_capped * math.sqrt(total_trades)
+            / (1.0 + dd_pct)
+        )
+    _, dd_pct = max_drawdown_abs_pct(equity_curve.to_numpy(dtype=np.float64))
+    return total_return_pct - dd_pct

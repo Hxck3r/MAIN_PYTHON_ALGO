@@ -733,3 +733,49 @@ class BacktestEngine:
             strategy_name=self.strategy_cls.__name__,
             strategy_params=dict(strategy.p),
         )
+
+
+# ---------------------------------------------------------------------- #
+# Диспетчер движка
+# ---------------------------------------------------------------------- #
+def run_backtest(
+    data: pd.DataFrame,
+    strategy_cls: Type[BaseStrategy],
+    strategy_params: Optional[dict[str, Any]] = None,
+    *,
+    prefer_fast: bool = True,
+    **engine_kwargs: Any,
+) -> BacktestResult:
+    """Прогон стратегии с автоматическим выбором движка.
+
+    Для наследников SignalStrategy (при установленной numba) используется
+    быстрое numba-ядро run_fast_backtest -- десятки крат быстрее на сетках и
+    в WFA; для остальных стратегий и при отсутствии numba -- событийный
+    BacktestEngine. Оба пути дают идентичный BacktestResult (эквивалентность
+    зафиксирована в tests/test_fast_engine.py), поэтому метрики / WFA /
+    Монте-Карло / визуализация работают одинаково.
+
+    prefer_fast=False принудительно использует событийный движок (нужно,
+    например, в тестах эквивалентности).
+    """
+    if prefer_fast:
+        try:
+            from .fast_engine import SignalStrategy, run_fast_backtest
+        except ImportError:
+            pass  # numba не установлена -- тихо откатываемся на событийный движок
+        else:
+            if isinstance(strategy_cls, type) and issubclass(
+                strategy_cls, SignalStrategy
+            ):
+                return run_fast_backtest(
+                    data=data,
+                    strategy_cls=strategy_cls,
+                    strategy_params=strategy_params,
+                    **engine_kwargs,
+                )
+    return BacktestEngine(
+        data=data,
+        strategy_cls=strategy_cls,
+        strategy_params=strategy_params,
+        **engine_kwargs,
+    ).run()
