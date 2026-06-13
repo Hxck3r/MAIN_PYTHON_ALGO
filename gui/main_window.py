@@ -707,6 +707,16 @@ class MainWindow(QMainWindow):
                 f"при {opt_result.best_params} "
                 f"({len(opt_result.history)} испытаний)"
             )
+            if opt_result.deflated_sharpe is not None:
+                d = opt_result.deflated_sharpe
+                verdict = (
+                    "значим с учётом перебора" if d.dsr >= 0.95
+                    else "вероятен артефакт множественного тестирования"
+                )
+                self._log(
+                    f"Deflated Sharpe: {d.dsr:.2f} — {verdict} "
+                    f"(Sharpe {d.observed_sr:.3f} vs порог шума {d.expected_max_sr:.3f})"
+                )
             self._apply_and_backtest(opt_result.best_params)
         else:
             self._log("Оптимизация: ни один прогон не прошёл фильтр мин. сделок")

@@ -195,6 +195,40 @@ def deflated_sharpe_ratio(
     )
 
 
+def deflated_sharpe_from_optimization(
+    data: pd.DataFrame,
+    strategy_cls: Type[BaseStrategy],
+    best_params: dict[str, Any],
+    n_trials: int,
+    fixed_params: Optional[dict[str, Any]] = None,
+    engine_kwargs: Optional[dict[str, Any]] = None,
+) -> DeflatedSharpeResult:
+    """DSR лучшего набора параметров оптимизации (готовый к отчёту).
+
+    Прогоняет best_params, берёт доходности кривой эквити и дефлирует их
+    Sharpe на число перебранных комбинаций n_trials. Отвечает на вопрос
+    «лучший результат -- это сигнал или артефакт перебора N комбинаций?»:
+    DSR >= 0.95 -- значим даже с учётом множественного тестирования.
+
+    Метрика оптимизации может быть любой -- DSR оценивает значимость именно
+    Sharpe найденного прогона (с поправкой на размер перебора), поэтому
+    n_trials должен быть числом реально оценённых комбинаций.
+    """
+    engine = BacktestEngine(
+        data=data,
+        strategy_cls=strategy_cls,
+        strategy_params={**(fixed_params or {}), **best_params},
+        **(engine_kwargs or {}),
+    )
+    result = engine.run()
+    returns = result.equity_curve.pct_change().dropna().to_numpy(dtype=np.float64)
+    # trial_scores не влияют на расчёт (нужен лишь счётчик испытаний) --
+    # число перебранных комбинаций передаём явно через n_trials.
+    return deflated_sharpe_ratio(
+        returns, np.empty(0, dtype=np.float64), n_trials=max(int(n_trials), 1)
+    )
+
+
 # ---------------------------------------------------------------------- #
 # Выбор параметров по плато
 # ---------------------------------------------------------------------- #

@@ -5,8 +5,12 @@ import numpy as np
 import pytest
 
 from backtester import (
+    DeflatedSharpeResult,
+    GridSearchOptimizer,
+    deflated_sharpe_from_optimization,
     deflated_sharpe_ratio,
     expected_max_sharpe,
+    make_backtest_objective,
     permutation_test,
     permute_bars,
     probabilistic_sharpe_ratio,
@@ -78,6 +82,27 @@ def test_permute_bars_preserves_distribution(synth_1h):
     assert np.allclose(np.sort(orig.to_numpy()), np.sort(perm.to_numpy()), rtol=1e-9)
     # а порядок -- другой
     assert not np.allclose(orig.to_numpy(), perm.to_numpy())
+
+
+def test_deflated_sharpe_from_optimization(synth_1h):
+    """Хелпер прогоняет лучшие параметры и дефлирует Sharpe на число испытаний."""
+    grid = {"fast_period": [5, 10, 15], "slow_period": [20, 30]}
+    objective = make_backtest_objective(
+        data=synth_1h, strategy_cls=SmaCrossStrategy, metric="sharpe_ratio",
+        min_trades=0,
+    )
+    opt = GridSearchOptimizer(objective, param_grid=grid).optimize()
+
+    dsr = deflated_sharpe_from_optimization(
+        synth_1h, SmaCrossStrategy, opt.best_params, n_trials=len(opt.history),
+    )
+    assert isinstance(dsr, DeflatedSharpeResult)
+    assert dsr.n_trials == len(opt.history) == 6
+    assert 0.0 <= dsr.dsr <= 1.0
+    # поправка на перебор не делает DSR выше «сырого» PSR
+    assert dsr.dsr <= dsr.psr_zero + 1e-12
+    # вердикт печатается в отчёте
+    assert "Deflated Sharpe" in str(dsr)
 
 
 def test_permutation_test_runs(synth_1h):

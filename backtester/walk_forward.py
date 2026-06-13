@@ -28,10 +28,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Type
+from typing import TYPE_CHECKING, Any, Callable, Optional, Type
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:  # только для аннотаций -- без циклического импорта
+    from .statistics import DeflatedSharpeResult
 
 from .backtest_engine import BacktestEngine
 from .base_strategy import BaseStrategy
@@ -185,6 +188,9 @@ class WalkForwardResult:
     max_consecutive_losing_windows: int = 0  # самая длинная серия убыточных окон
     is_oos_rank_corr: float = math.nan       # Spearman is_score vs oos_score
     avg_plateau_pct: float = math.nan        # средняя «ширина плато» оптимума, %
+    # DSR сшитой OOS-кривой с поправкой на размер перебора в окне (n_trials):
+    # значим ли OOS-Sharpe с учётом того, что оптимизатор отсеивал N кандидатов.
+    oos_dsr: Optional["DeflatedSharpeResult"] = None
 
     @property
     def n_windows(self) -> int:
@@ -421,6 +427,14 @@ class WalkForwardResult:
             else f"{self.avg_plateau_pct:.0f}%"
         )
         modal, cnt, pct = self.modal_param_set()
+        if self.oos_dsr is None:
+            dsr = "n/a"
+        else:
+            verdict = "значим" if self.oos_dsr.dsr >= 0.95 else "вероятен шум"
+            dsr = (
+                f"{self.oos_dsr.dsr:.2f} ({verdict}; порог шума SR*="
+                f"{self.oos_dsr.expected_max_sr:.3f} при {self.oos_dsr.n_trials} испыт.)"
+            )
         return (
             f"=== Walk-Forward Analysis ===\n"
             f"Окон: {self.n_windows} (пропущено {self.skipped_windows})\n"
@@ -432,6 +446,7 @@ class WalkForwardResult:
             f"OOS доходность: {self.oos_stats.total_return_pct:.2f}%\n"
             f"OOS Sharpe: {self.oos_stats.sharpe_ratio:.2f}, "
             f"MaxDD: {self.oos_stats.max_drawdown_pct:.2f}%\n"
+            f"OOS Deflated Sharpe: {dsr}\n"
             f"Самый частый набор: {self._fmt_params(modal)} ({pct:.0f}% окон)"
         )
 
@@ -881,6 +896,21 @@ def run_walk_forward(
         retention, tstat, max_losing = math.nan, math.nan, 0
         rank_corr, avg_plateau = math.nan, math.nan
 
+    # Deflated Sharpe сшитой OOS-кривой: значимость OOS-Sharpe с поправкой на
+    # размер перебора в окне (сколько кандидатов отсеивал оптимизатор). Для
+    # сетки это её мощность, для генетики -- число оценённых геномов.
+    from .statistics import deflated_sharpe_ratio
+
+    grid_size = int(np.prod([len(v) for v in grid.values()]))
+    trials = population_size * generations if use_genetic else grid_size
+    oos_returns = stitched.pct_change().dropna().to_numpy(dtype=np.float64)
+    oos_dsr = (
+        deflated_sharpe_ratio(
+            oos_returns, np.empty(0, dtype=np.float64), n_trials=max(trials, 1)
+        )
+        if len(oos_returns) >= 2 else None
+    )
+
     status("Walk-Forward завершён")
     return WalkForwardResult(
         config=config,
@@ -900,4 +930,5 @@ def run_walk_forward(
         max_consecutive_losing_windows=max_losing,
         is_oos_rank_corr=rank_corr,
         avg_plateau_pct=avg_plateau,
+        oos_dsr=oos_dsr,
     )

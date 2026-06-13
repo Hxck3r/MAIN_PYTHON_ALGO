@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from backtester import (
     GeneticOptimizer,
     GridSearchOptimizer,
     IntParam,
+    deflated_sharpe_from_optimization,
     generate_synthetic_data,
     make_backtest_objective,
 )
@@ -32,6 +34,19 @@ from backtester.visualizer import plot_backtest, plot_optimization, plot_param_h
 from strategies import SmaCrossStrategy
 
 REPORTS_DIR = Path(__file__).parent / "reports"
+
+
+def _attach_dsr(result, data: pd.DataFrame) -> None:
+    """Считает Deflated Sharpe лучшего результата и кладёт его в result.
+
+    n_trials -- число реально оценённых комбинаций (len(history)). После
+    этого result.__str__ автоматически печатает вердикт о значимости.
+    """
+    if result.best_params and math.isfinite(result.best_score):
+        result.deflated_sharpe = deflated_sharpe_from_optimization(
+            data, SmaCrossStrategy, result.best_params,
+            n_trials=len(result.history), engine_kwargs=ENGINE_KWARGS,
+        )
 
 # Общие настройки счёта (применяются и в бэктесте, и в оптимизации)
 ENGINE_KWARGS = dict(
@@ -90,6 +105,7 @@ def run_grid_search(data: pd.DataFrame) -> None:
         verbose=True,
     )
     result = grid.optimize()
+    _attach_dsr(result, data)
     print(result, "\n")
 
     plot_optimization(
@@ -125,6 +141,7 @@ def run_genetic(data: pd.DataFrame) -> None:
         verbose=True,
     )
     result = genetic.optimize()
+    _attach_dsr(result, data)
     print(result, "\n")
 
     plot_optimization(

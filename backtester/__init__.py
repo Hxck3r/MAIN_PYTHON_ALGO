@@ -41,6 +41,7 @@ from .parallel import ParallelEvaluator, default_jobs
 from .statistics import (
     DeflatedSharpeResult,
     PermutationTestResult,
+    deflated_sharpe_from_optimization,
     deflated_sharpe_ratio,
     expected_max_sharpe,
     permutation_test,
@@ -88,6 +89,7 @@ __all__ = [
     "default_jobs",
     "DeflatedSharpeResult",
     "PermutationTestResult",
+    "deflated_sharpe_from_optimization",
     "deflated_sharpe_ratio",
     "expected_max_sharpe",
     "permutation_test",

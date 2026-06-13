@@ -133,3 +133,19 @@ def test_wfa_result_has_robustness_metrics(synth_1h):
         assert 0.0 <= result.avg_plateau_pct <= 100.0
     # текстовый отчёт по параметрам не падает
     assert "Spearman" in result.param_report()
+
+
+def test_wfa_result_has_deflated_sharpe(synth_1h):
+    from backtester import DeflatedSharpeResult
+
+    result = run_walk_forward(
+        data=synth_1h, strategy_cls=SmaCrossStrategy,
+        config=_config(), grid={"fast_period": [5, 10, 15], "slow_period": [20, 30]},
+        metric="sharpe_ratio", min_trades=0,
+    )
+    assert isinstance(result.oos_dsr, DeflatedSharpeResult)
+    assert 0.0 <= result.oos_dsr.dsr <= 1.0
+    # n_trials = мощность сетки (3 × 2 = 6 комбинаций на окно)
+    assert result.oos_dsr.n_trials == 6
+    # DSR попадает в текстовый отчёт
+    assert "Deflated Sharpe" in str(result)

@@ -110,6 +110,11 @@ class WfaSummaryTable(QTableWidget):
             f"{result.avg_plateau_pct:.0f} %"
             if math.isfinite(result.avg_plateau_pct) else "n/a"
         )
+        if result.oos_dsr is None:
+            dsr_text, dsr_color = "n/a", None
+        else:
+            dsr_text = f"{result.oos_dsr.dsr:.2f}"
+            dsr_color = COLOR_GOOD if result.oos_dsr.dsr >= 0.95 else COLOR_WARN
         rows: list[tuple[str, str, Optional[str]]] = [
             ("Walk-Forward Efficiency", wfe_text, _wfe_color(result.wfe_pct)),
             (f"Удержание критерия IS→OOS", retention_text,
@@ -132,6 +137,7 @@ class WfaSummaryTable(QTableWidget):
             ("Плато оптимума (соседи)", plateau_text,
              COLOR_GOOD if math.isfinite(result.avg_plateau_pct)
              and result.avg_plateau_pct >= 50 else COLOR_WARN),
+            ("OOS Deflated Sharpe (DSR)", dsr_text, dsr_color),
             ("Разброс OOS-доходностей (std)",
              f"{result.consistency_std:.2f} %", None),
             ("OOS доходность (сшитая)", f"{stats.total_return_pct:.2f} %", None),

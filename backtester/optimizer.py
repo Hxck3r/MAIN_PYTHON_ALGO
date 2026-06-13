@@ -20,12 +20,15 @@ import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from itertools import product
-from typing import Any, Callable, Iterable, Optional, Sequence, Type
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence, Type
 
 import pandas as pd
 
 from .backtest_engine import BacktestEngine
 from .base_strategy import BaseStrategy
+
+if TYPE_CHECKING:  # только для аннотаций -- без циклического импорта
+    from .statistics import DeflatedSharpeResult
 
 Objective = Callable[[dict[str, Any]], float]
 
@@ -96,6 +99,9 @@ class OptimizationResult:
     best_score: float
     history: list[tuple[dict[str, Any], float]] = field(default_factory=list)
     method: str = ""
+    # DSR лучшего результата с поправкой на размер перебора; заполняется
+    # вызывающим кодом (deflated_sharpe_from_optimization) после оптимизации.
+    deflated_sharpe: Optional["DeflatedSharpeResult"] = None
 
     def history_df(self) -> pd.DataFrame:
         """История всех испытаний: колонки параметров + score."""
@@ -103,12 +109,20 @@ class OptimizationResult:
         return pd.DataFrame(rows)
 
     def __str__(self) -> str:
-        return (
-            f"=== Оптимизация ({self.method}) ===\n"
-            f"Испытаний: {len(self.history)}\n"
-            f"Лучший score: {self.best_score:.4f}\n"
-            f"Лучшие параметры: {self.best_params}"
-        )
+        lines = [
+            f"=== Оптимизация ({self.method}) ===",
+            f"Испытаний: {len(self.history)}",
+            f"Лучший score: {self.best_score:.4f}",
+            f"Лучшие параметры: {self.best_params}",
+        ]
+        if self.deflated_sharpe is not None:
+            d = self.deflated_sharpe
+            verdict = "значим" if d.dsr >= 0.95 else "вероятен артефакт перебора"
+            lines.append(
+                f"Deflated Sharpe: {d.dsr:.2f} ({verdict}; Sharpe {d.observed_sr:.3f} "
+                f"vs порог шума {d.expected_max_sr:.3f} при {d.n_trials} испыт.)"
+            )
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------- #

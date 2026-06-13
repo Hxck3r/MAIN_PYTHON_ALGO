@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Type
 
 import pandas as pd
@@ -18,6 +19,7 @@ from backtester import (
     GridSearchOptimizer,
     MonteCarloConfig,
     WalkForwardConfig,
+    deflated_sharpe_from_optimization,
     make_backtest_objective,
     run_monte_carlo,
     run_walk_forward,
@@ -140,6 +142,18 @@ class OptimizationWorker(QThread):
         finally:
             if evaluator is not None:
                 evaluator.close()
+
+        # Deflated Sharpe лучшего результата (в фоне, не блокируя GUI): значим
+        # ли найденный Sharpe с поправкой на число перебранных комбинаций.
+        if result.best_params and math.isfinite(result.best_score):
+            try:
+                result.deflated_sharpe = deflated_sharpe_from_optimization(
+                    self.data, self.strategy_cls, result.best_params,
+                    n_trials=len(result.history),
+                    fixed_params=self.fixed_params, engine_kwargs=self.engine_kwargs,
+                )
+            except Exception:
+                result.deflated_sharpe = None
         self.finished_ok.emit(result)
 
 
