@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import numpy as np
@@ -23,17 +22,49 @@ if TYPE_CHECKING:  # только для аннотаций, избегаем ц
     from .backtest_engine import Broker, Order, Position
 
 
-@dataclass(frozen=True, slots=True)
 class Bar:
-    """Один бар рыночных данных, передаётся в Strategy.next()."""
+    """Один бар рыночных данных, передаётся в Strategy.next().
 
-    index: int                 # порядковый номер бара (0..n-1)
-    datetime: pd.Timestamp     # время бара
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
+    Лёгкий объект на __slots__ (без dataclass/frozen): создаётся на каждом
+    баре, поэтому важна дешевизна конструктора.
+
+    ``datetime`` боксится ЛЕНИВО -- pandas Timestamp собирается из исходного
+    индекса только при обращении к свойству. Боксинг Timestamp на каждом баре
+    раньше съедал ~половину времени бэктеста, хотя нужен лишь в момент сделки
+    (entry_time / exit_time), а сделок в сотни раз меньше, чем баров.
+    """
+
+    __slots__ = ("index", "open", "high", "low", "close", "volume", "_dt_src")
+
+    def __init__(
+        self,
+        index: int,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+        dt_src: pd.DatetimeIndex,
+    ) -> None:
+        self.index = index           # порядковый номер бара (0..n-1)
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
+        self._dt_src = dt_src         # исходный DatetimeIndex для ленивого боксинга
+
+    @property
+    def datetime(self) -> pd.Timestamp:
+        """Время бара (боксится из индекса по требованию, сохраняя tz)."""
+        return self._dt_src[self.index]
+
+    def __repr__(self) -> str:
+        return (
+            f"Bar(index={self.index}, datetime={self.datetime}, "
+            f"open={self.open}, high={self.high}, low={self.low}, "
+            f"close={self.close}, volume={self.volume})"
+        )
 
 
 class BaseStrategy(ABC):

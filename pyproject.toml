@@ -12,8 +12,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Numba-ускорение сигнального движка (backtester.fast_engine). Опционально:
+# ядро пакета работает без него, numba нужен только для run_fast_backtest.
+fast = [
+    "numba>=0.60",
+]
 dev = [
     "pytest>=8.0",
+    "numba>=0.60",
 ]
 
 [tool.pytest.ini_options]

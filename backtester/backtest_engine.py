@@ -704,13 +704,13 @@ class BacktestEngine:
 
         for i in range(n):
             bar = Bar(
-                index=i,
-                datetime=index[i],
-                open=float(opens[i]),
-                high=float(highs[i]),
-                low=float(lows[i]),
-                close=float(closes[i]),
-                volume=float(volumes[i]),
+                i,
+                float(opens[i]),
+                float(highs[i]),
+                float(lows[i]),
+                float(closes[i]),
+                float(volumes[i]),
+                index,
             )
             # 1) исполнение отложенного: ордера прошлых баров, SL/TP
             broker.process_bar(bar)
