@@ -9,28 +9,36 @@
 main_python_algo/
 ├── backtester/               # ядро фреймворка (пакет)
 │   ├── data_loader.py        # загрузка/очистка/валидация CSV (понимает экспорт MT5)
-│   ├── base_strategy.py      # абстрактная стратегия: init() / next(bar)
+│   ├── base_strategy.py      # абстрактная стратегия: init() / next(bar); лёгкий Bar
 │   ├── backtest_engine.py    # событийный симулятор: ордера, SL/TP, комиссии, слиппедж
+│   ├── fast_engine.py        # быстрый numba-движок сигнальных стратегий (SignalStrategy)
 │   ├── metrics.py            # Sharpe, Sortino, Calmar, Max DD, exposure, Profit Factor...
 │   ├── monte_carlo.py        # Монте-Карло: перемешивание сделок, вероятности, риск разорения
 │   ├── optimizer.py          # Grid Search + генетический алгоритм
+│   ├── parallel.py           # параллельная оценка параметров (пул процессов)
+│   ├── walk_forward.py       # Walk-Forward Analysis (скользящие окна IS/OOS)
 │   ├── statistics.py         # защита от переоптимизации: DSR, плато-выбор, permutation-тест
 │   └── visualizer.py         # интерактивные графики (Plotly, HTML-отчёты)
-├── strategies/               # пользовательские стратегии
-│   └── sma_cross.py          # пример: кроссовер SMA с SL/TP
+├── strategies/               # пользовательские стратегии («картриджи» для тестера)
+│   ├── __init__.py           # реестр STRATEGIES (тут регистрируются стратегии)
+│   ├── sma_cross.py          # пример для событийного движка (BaseStrategy)
+│   └── sma_cross_signal.py   # тот же SMA для быстрого движка (SignalStrategy)
 ├── gui/                      # десктопный GUI (PySide6 + finplot/pyqtgraph)
 │   ├── main_window.py        # главное окно в стиле тестера MT5
 │   ├── chart_widget.py       # быстрый график: свечи + сделки + эквити
 │   ├── param_table.py        # таблица параметров: галочки, Старт/Шаг/Стоп
 │   ├── results_panel.py      # таблицы метрик/сделок/оптимизации
+│   ├── opt_charts.py         # тепловая карта и гистограмма ландшафта оптимизации
+│   ├── wfa_panel.py          # дашборд Walk-Forward: сводка устойчивости, графики окон
 │   ├── mc_panel.py           # дашборд Монте-Карло: веер эквити, гистограммы, сводка
 │   └── workers.py            # фоновые потоки расчётов
+├── tests/                    # pytest: эквивалентность движков, метрики, WFA, MC, анти-lookahead
 ├── data/                     # исторические CSV (в .gitignore, в git не хранятся)
 ├── desktop_app.py            # запуск десктопного «Тестера стратегий» (GUI)
 ├── main.py                   # демонстрация полного цикла (скриптом)
 ├── sanity_check.py           # проверки честности движка
 ├── gui_smoke_test.py         # smoke-тест десктопного GUI (offscreen)
-├── requirements.txt
+├── pyproject.toml            # зависимости и extras ([fast] — numba, [dev] — pytest)
 └── reports/                  # сюда сохраняются HTML-отчёты (создаётся автоматически)
 ```
 
@@ -46,10 +54,14 @@ python main.py path/to/data.csv # то же на своих данных (в т.
 python sanity_check.py          # проверки честности движка
 python gui_smoke_test.py        # smoke-тест десктопного GUI
 
-pip install -e ".[dev]"         # зависимости для разработки (pytest)
-pytest                          # полный набор тестов (tests/), включая
-                                # автоматическую проверку отсутствия lookahead
+pip install -e ".[fast]"        # быстрый numba-движок сигнальных стратегий (опц.)
+pip install -e ".[dev]"         # зависимости для разработки (pytest + numba)
+pytest                          # полный набор тестов (tests/), включая эквивалентность
+                                # движков и автоматическую проверку отсутствия lookahead
 ```
+
+> `numba` нужен только для быстрого движка (`fast_engine`). Ядро пакета и
+> событийный движок работают без него.
 
 ## Десктопный «Тестер стратегий» (python desktop_app.py)
 
@@ -71,24 +83,131 @@ pytest                          # полный набор тестов (tests/),
 Profit Factor, Win Rate, Recovery Factor, матожидание, Complex Criterion
 (комплексный, как в MT5). Методы: полный перебор и генетический алгоритм.
 
-## Своя стратегия за 3 шага
+## Два движка — один контракт стратегии
+
+Стратегия — это «картридж»: класс, который вставляется в тестер. Движок не
+знает, что внутри стратегии; стратегия не знает, как устроено исполнение.
+Есть два движка с **одинаковой моделью исполнения** (вход по открытию
+следующего бара, приоритет SL, спред/слиппедж/комиссии, неттинг) — выбирайте
+под задачу:
+
+| | Событийный (`BacktestEngine`) | Быстрый (`run_fast_backtest`) |
+|---|---|---|
+| Базовый класс | `BaseStrategy` (`init` + `next`) | `SignalStrategy` (`compute_signals`) |
+| Логика | произвольная, бар за баром | выражается массивами сигналов |
+| Скорость (100k баров) | ~0.3 c | ~0.01 c (ядро ~0.6 мс) |
+| Зависимость | только numpy/pandas | + `numba` (extras `[fast]`) |
+| Когда брать | сложная логика: трейлинг, лимитные/стоп-ордера, частичные закрытия, состояние между барами | одна неттинг-позиция + SL/TP по сигналам; **массовая оптимизация и WFA** |
+
+Результаты обоих движков для сигнальной стратегии **совпадают побитово**
+(проверяется в тестах) — быстрый движок не «другая модель», а та же модель
+на скомпилированном ядре. Практический приём: пишите стратегию как
+`SignalStrategy` (она работает на обоих движках), оптимизируйте/прогоняйте
+WFA быстрым движком, а сложную ручную отладку при желании — на событийном.
+
+## Своя стратегия за 3 шага (событийный движок)
+
+**Шаг 1.** Создайте файл `strategies/my_strategy.py` с классом-наследником
+`BaseStrategy`. Стратегия — это всегда **класс** (не функция и не скрипт):
+движок умеет работать только с наследниками `BaseStrategy`.
 
 ```python
 from backtester import BaseStrategy, Bar
+import numpy as np
+import pandas as pd
 
 class MyStrategy(BaseStrategy):
-    params = {"period": 20}                      # 1. параметры (видны оптимизатору)
+    params = {"period": 20, "sl_pct": 0.02, "tp_pct": 0.05}  # 1. параметры (видны оптимизатору)
 
-    def init(self) -> None:                      # 2. предрасчёт индикаторов
-        import pandas as pd
-        self.sma = pd.Series(self.full_close).rolling(self.p["period"]).mean().to_numpy()
+    def init(self) -> None:                      # 2. предрасчёт индикаторов (один раз)
+        self.sma = pd.Series(self.full_close).rolling(int(self.p["period"])).mean().to_numpy()
 
     def next(self, bar: Bar) -> None:            # 3. логика на каждом баре
-        if bar.close > self.sma[bar.index] and not self.position:
-            self.buy(stop_loss=bar.close * 0.98, take_profit=bar.close * 1.05)
-        elif bar.close < self.sma[bar.index] and self.position:
+        i = bar.index
+        if np.isnan(self.sma[i]):
+            return                               # индикатор ещё не прогрелся
+        if bar.close > self.sma[i] and not self.position:
+            self.buy(stop_loss=bar.close * (1 - self.p["sl_pct"]),
+                     take_profit=bar.close * (1 + self.p["tp_pct"]))
+        elif bar.close < self.sma[i] and self.position:
             self.close_position()
 ```
+
+**Шаг 2 — регистрация (обязательно!).** Чтобы стратегия появилась в GUI и в
+`main.py`, добавьте её в реестр `strategies/__init__.py` — импорт + строку
+в словарь `STRATEGIES` (ключ = имя, видимое в выпадающем списке GUI):
+
+```python
+from .my_strategy import MyStrategy
+
+STRATEGIES = {
+    "SMA Crossover (пересечение скользящих)": SmaCrossStrategy,
+    "Моя стратегия (SMA + SL/TP)": MyStrategy,        # <- добавили
+}
+```
+
+> Если забыть про реестр — при запуске будет `ModuleNotFoundError` или
+> `ImportError`. Имя класса в `__init__.py` должно точно совпадать с именем
+> класса в файле стратегии, а сам файл — лежать в папке `strategies/`.
+
+**Шаг 3 — запуск.** `python desktop_app.py` → стратегия в списке слева;
+либо в `main.py` подставьте свой класс в `strategy_cls=...`.
+
+### Чек-лист правильной стратегии
+
+- **Тяжёлые расчёты — в `init()`**, а не в `next()` (он вызывается на каждом баре).
+- **Индикаторы — векторно** (`rolling`/`ewm`/`np`-операции на всём массиве),
+  без Python-циклов по барам: цикл в `init()` пересчитывается на каждой
+  комбинации параметров и убивает выигрыш от оптимизации.
+- **Индексируйте по `bar.index`**: `self.sma[bar.index]`, `[i-1]` и т.п.
+- **Никакого заглядывания в будущее**: индикатор в точке `i` должен
+  использовать только бары ≤ `i`. `rolling`/`ewm`/`shift(+k)` это гарантируют.
+  Опасно: `shift(-k)`, `center=True`, `bfill`, нормировка по всему ряду
+  (`(x-x.mean())/x.std()`) — они подмешивают будущее (его ловит тест в `tests/`).
+- **Торгуйте только через API** `self.buy/sell/close_position` — сайзинг
+  можно отдать риску: `self.buy(risk_pct=0.01, stop_loss=...)`.
+
+## Быстрая стратегия для numba-движка
+
+Тот же контракт, но логика выражается **массивами сигналов**. Наследуйте
+`SignalStrategy` и заполните в `compute_signals()` массивы длины n:
+`_sig[i]` (+1 лонг / −1 шорт / 0 — ничего; исполнится на открытии `i+1`),
+`_sl[i]` / `_tp[i]` (абсолютные уровни SL/TP, `NaN` — нет), опционально
+`_size[i]` / `_risk[i]`. Тот же класс работает и на событийном движке.
+
+```python
+import numpy as np, pandas as pd
+from backtester.fast_engine import SignalStrategy, run_fast_backtest, assert_no_lookahead
+
+class MySignal(SignalStrategy):
+    params = {"period": 20, "sl_pct": 0.02, "tp_pct": 0.05}
+
+    def compute_signals(self) -> None:            # вызывается один раз
+        close = pd.Series(self.full_close)
+        sma = close.rolling(int(self.p["period"])).mean().to_numpy()
+        prices = self.full_close
+        # ВЕКТОРНО, без цикла по барам: пробой SMA снизу вверх -> лонг
+        prev = (prices[:-1] <= sma[:-1]) & (prices[1:] > sma[1:])
+        idx = np.flatnonzero(prev & ~np.isnan(sma[:-1])) + 1
+        self._sig[idx] = 1
+        self._sl[idx] = prices[idx] * (1 - self.p["sl_pct"])
+        self._tp[idx] = prices[idx] * (1 + self.p["tp_pct"])
+
+result = run_fast_backtest(df, MySignal, {"period": 20}, commission_pct=0.0005)
+assert_no_lookahead(MySignal, df, {"period": 20})   # проверка причинности сигналов
+```
+
+> **Важно про lookahead в сигнальной форме.** Защита в виде «срезов до бара
+> `i`» здесь не работает — `compute_signals()` видит весь массив сразу.
+> Прогон на событийном движке тоже **не** проверяет причинность (оба движка
+> читают одни и те же предрассчитанные сигналы). Поэтому для каждой
+> сигнальной стратегии вызывайте `assert_no_lookahead(...)`: она пересчитывает
+> сигналы на префиксах данных и ловит зависимость от будущих баров.
+
+> **Готовый индикатор-функция?** Оберните его: посчитайте сигналы в
+> `init()` / `compute_signals()` через свою функцию, а торгуйте по
+> предрассчитанным массивам. Сам по себе модуль с функцией стратегией не
+> является — тестеру нужен класс-наследник `BaseStrategy`/`SignalStrategy`.
 
 ## Модель исполнения (важно)
 
@@ -150,7 +269,9 @@ class MyStrategy(BaseStrategy):
 
 - **Deflated Sharpe Ratio** (Bailey & López de Prado): PSR против порога —
   ожидаемого максимума Sharpe среди N испытаний чистого шума. `DSR > 0.95` —
-  результат значим даже с учётом числа перебранных комбинаций.
+  результат значим даже с учётом числа перебранных комбинаций. **Считается
+  автоматически** и печатается в отчётах оптимизации (CLI и GUI) и WFA:
+  `n_trials` = число перебранных комбинаций.
 - **Плато-выбор параметров** (`select_plateau_params`): вместо argmax по
   сетке — лучшее среднее по окрестности; острые одиночные пики
   (= переобучение) проигрывают устойчивым областям.
@@ -160,11 +281,14 @@ class MyStrategy(BaseStrategy):
   эксплуатирует именно временнУю структуру рынка.
 
 ```python
-from backtester import deflated_sharpe_ratio, permutation_test, select_plateau_params
+from backtester import (
+    deflated_sharpe_from_optimization, permutation_test, select_plateau_params,
+)
 
-returns = result.equity_curve.pct_change().dropna().to_numpy()
-scores = opt_result.history_df()["score"].to_numpy()
-print(deflated_sharpe_ratio(returns, scores))            # DSR лучшего прогона
+# DSR лучшего результата оптимизации (прогон + дефляция на число испытаний)
+print(deflated_sharpe_from_optimization(
+    df, MyStrategy, opt_result.best_params, n_trials=len(opt_result.history),
+))
 print(permutation_test(df, MyStrategy, best_params))     # p-value против шума
 params, _ = select_plateau_params(opt_result.history)    # устойчивый оптимум
 ```
