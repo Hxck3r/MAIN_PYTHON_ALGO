@@ -15,6 +15,9 @@ data/
 # Локальные настройки инструментов
 .claude/settings.local.json
 
+# Настройки ИИ-ассистента (содержат API-ключ — не коммитим)
+.ai_assistant.json
+
 # IDE
 .vscode/
 .idea/

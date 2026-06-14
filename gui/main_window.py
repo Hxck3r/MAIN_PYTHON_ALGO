@@ -84,6 +84,10 @@ class MainWindow(QMainWindow):
         self._worker: Optional[Any] = None               # активный поток
         self._last_opt: Optional[OptimizationResult] = None
         self._last_result: Optional[BacktestResult] = None  # для Монте-Карло
+        self._last_wfa: Optional[WalkForwardResult] = None       # для ИИ-контекста
+        self._last_matrix: Optional[WfaMatrixResult] = None      # для ИИ-контекста
+        self._last_mc: Optional[MonteCarloResult] = None         # для ИИ-контекста
+        self._ai_window: Optional[Any] = None            # окно ИИ-ассистента
         self._task_started: Optional[float] = None       # старт расчёта (для ETA)
 
         self._build_ui()
@@ -127,6 +131,18 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         panel.setMinimumWidth(312)   # ширину задаёт область прокрутки-обёртка
         layout = QVBoxLayout(panel)
+
+        # --- ИИ-ассистент ------------------------------------------------#
+        self.btn_ai = QPushButton("🤖  ИИ-ассистент «Квант»")
+        self.btn_ai.setToolTip(
+            "Чат-помощник: пишет стратегии под контракт проекта, читает метрики\n"
+            "(бэктест / оптимизация / WFA / WFO / Монте-Карло), борется с\n"
+            "переобучением, объясняет встроенные функции. Нужен ключ OpenRouter\n"
+            "или локальная LLM (Ollama / LM Studio)."
+        )
+        self.btn_ai.setStyleSheet("font-weight: bold; padding: 6px;")
+        self.btn_ai.clicked.connect(self._open_ai_assistant)
+        layout.addWidget(self.btn_ai)
 
         # --- Данные ------------------------------------------------------#
         data_box = QGroupBox("Данные")
@@ -766,6 +782,7 @@ class MainWindow(QMainWindow):
 
     def _on_mc_done(self, result: MonteCarloResult) -> None:
         self._set_busy(False)
+        self._last_mc = result
         self.mc_panel.show_result(result)
         self.tabs.setCurrentWidget(self.mc_panel)
         summary = (
@@ -793,6 +810,7 @@ class MainWindow(QMainWindow):
 
     def _on_wfa_done(self, result: WalkForwardResult) -> None:
         self._set_busy(False)
+        self._last_wfa = result
         self.wfa_panel.show_result(result)
         self.tabs.setCurrentWidget(self.wfa_panel)
         wfe = (
@@ -962,6 +980,7 @@ class MainWindow(QMainWindow):
 
     def _on_wfa_matrix_done(self, result: WfaMatrixResult) -> None:
         self._set_busy(False)
+        self._last_matrix = result
         self.wfa_matrix_panel.show_result(result)
         self.tabs.setCurrentWidget(self.wfa_matrix_panel)
         st = result.stability()
@@ -1100,6 +1119,147 @@ class MainWindow(QMainWindow):
                 color = "#ff5c5c"
         self.lbl_grid.setText(text)
         self.lbl_grid.setStyleSheet(f"color: {color}; padding: 2px 6px;")
+
+    # ================================================================== #
+    # ИИ-ассистент
+    # ================================================================== #
+    def _open_ai_assistant(self) -> None:
+        """Открывает (или поднимает) окно чата ИИ-ассистента."""
+        if self._ai_window is None:
+            try:
+                from gui.ai import AssistantWindow
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(
+                    self, "ИИ-ассистент",
+                    f"Не удалось загрузить модуль ассистента:\n{exc}",
+                )
+                return
+            self._ai_window = AssistantWindow(
+                state_provider=self._ai_state_snapshot, parent=self
+            )
+        self._ai_window.show()
+        self._ai_window.raise_()
+        self._ai_window.activateWindow()
+
+    def _ai_state_snapshot(self) -> str:
+        """Текстовый снимок состояния GUI для системного промпта ассистента."""
+        lines: list[str] = []
+
+        # --- Данные и настройки ------------------------------------------ #
+        data_label = self.lbl_data.text().replace("\n", " ")
+        lines.append(f"Данные: {data_label or '—'}")
+        lines.append(
+            f"Период теста: {self.date_from.date().toString('yyyy-MM-dd')} … "
+            f"{self.date_to.date().toString('yyyy-MM-dd')}"
+        )
+        lines.append(f"Стратегия: {self.combo_strategy.currentText()}")
+        lines.append(
+            f"Критерий оптимизации: {self.combo_criterion.currentText()}  ·  "
+            f"метод: {self.combo_method.currentText()}"
+        )
+        lines.append(
+            f"Счёт: капитал {self.spin_cash.value():,.0f}, "
+            f"комиссия {self.spin_commission.value():g}%, "
+            f"слиппедж {self.spin_slippage.value():g}%, "
+            f"мин. сделок {self.spin_min_trades.value()}"
+        )
+        try:
+            total, per_param = self.param_table.grid_summary()
+            if per_param:
+                parts = ", ".join(f"{n}: {c}" for n, c in per_param)
+                lines.append(f"Сетка оптимизации: {total} точек ({parts})")
+            fixed = self.param_table.fixed_values()
+            if fixed:
+                lines.append(f"Текущие параметры: {fixed}")
+        except Exception:  # noqa: BLE001
+            pass
+
+        # --- Последние результаты ---------------------------------------- #
+        lines.append("")
+        lines.append(self._snapshot_backtest())
+        lines.append(self._snapshot_optimization())
+        lines.append(self._snapshot_wfa())
+        lines.append(self._snapshot_matrix())
+        lines.append(self._snapshot_mc())
+        return "\n".join(p for p in lines if p is not None)
+
+    def _snapshot_backtest(self) -> str:
+        if self._last_result is None:
+            return "Последний бэктест: не выполнялся."
+        try:
+            s = self._last_result.stats()
+            return (
+                "Последний бэктест: "
+                f"доходность {s.total_return_pct:.2f}%, сделок {s.total_trades}, "
+                f"WinRate {s.win_rate_pct:.0f}%, PF {s.profit_factor:.2f}, "
+                f"Sharpe {s.sharpe_ratio:.2f}, Sortino {s.sortino_ratio:.2f}, "
+                f"MaxDD {s.max_drawdown_pct:.2f}%, Calmar {s.calmar_ratio:.2f}, "
+                f"expectancy {s.expectancy:.2f}, exposure {s.exposure_pct:.0f}%."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"Последний бэктест: есть, но метрики не собрать ({exc})."
+
+    def _snapshot_optimization(self) -> str:
+        opt = self._last_opt
+        if opt is None or not opt.best_params:
+            return "Оптимизация: не выполнялась."
+        text = (
+            f"Оптимизация: лучший score {opt.best_score:.4f} при {opt.best_params}, "
+            f"испытаний {len(opt.history)}."
+        )
+        if opt.deflated_sharpe is not None:
+            d = opt.deflated_sharpe
+            text += (
+                f" Deflated Sharpe={d.dsr:.2f} "
+                f"(Sharpe {d.observed_sr:.3f} vs порог шума {d.expected_max_sr:.3f})."
+            )
+        return text
+
+    def _snapshot_wfa(self) -> str:
+        w = self._last_wfa
+        if w is None:
+            return "Walk-Forward: не выполнялся."
+        wfe = f"{w.wfe_pct:.1f}%" if math.isfinite(w.wfe_pct) else "n/a"
+        return (
+            f"Walk-Forward: окон {w.n_windows} (пропущено {w.skipped_windows}), "
+            f"WFE {wfe}, прибыльных OOS-окон {w.pct_profitable_windows:.0f}%, "
+            f"OOS доходность {w.oos_stats.total_return_pct:.2f}%, "
+            f"OOS Sharpe {w.oos_stats.sharpe_ratio:.2f}, "
+            f"OOS MaxDD {w.oos_stats.max_drawdown_pct:.2f}%."
+        )
+
+    def _snapshot_matrix(self) -> str:
+        m = self._last_matrix
+        if m is None:
+            return "Матричный WFO: не выполнялся."
+        try:
+            st = m.stability()
+            robust = m.robust_cell()
+            rec = f"IS={robust.is_days}д/OOS={robust.oos_days}д" if robust else "n/a"
+            return (
+                f"Матричный WFO: ячеек {st.n_ran}/{st.n_cells}, avg WFE "
+                f"{st.avg_wfe_pct:.0f}%, прибыльных ячеек {st.pct_profitable_cells:.0f}%, "
+                f"плато {st.plateau_pct:.0f}%, робастная ячейка {rec}."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"Матричный WFO: есть результат ({exc})."
+
+    def _snapshot_mc(self) -> str:
+        mc = self._last_mc
+        if mc is None:
+            return "Монте-Карло: не выполнялось."
+        try:
+            return (
+                "Монте-Карло: медианная доходность "
+                f"{mc.return_percentile(50):+.2f}% "
+                f"[P5 {mc.return_percentile(5):+.2f}% … P95 {mc.return_percentile(95):+.2f}%], "
+                f"P(прибыль) {mc.prob_profit_pct:.0f}%, P(цель) {mc.prob_target_pct:.0f}%, "
+                f"P95 просадка {mc.dd_percentile(95):.2f}%, "
+                f"риск разорения {mc.risk_of_ruin_pct:.2f}%, "
+                f"ранг исходной кривой {mc.original_return_rank_pct:.0f}%."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"Монте-Карло: есть результат ({exc})."
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(f"[{datetime.now():%H:%M:%S}] {message}")
