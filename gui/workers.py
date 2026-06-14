@@ -19,10 +19,12 @@ from backtester import (
     GridSearchOptimizer,
     MonteCarloConfig,
     WalkForwardConfig,
+    WfaMatrixConfig,
     deflated_sharpe_from_optimization,
     make_backtest_objective,
     run_monte_carlo,
     run_walk_forward,
+    run_wfa_matrix,
 )
 from backtester.parallel import ParallelEvaluator
 from backtester.walk_forward import grid_to_space
@@ -231,6 +233,71 @@ class WalkForwardWorker(QThread):
                 config=self.config,
                 grid=self.grid,
                 metric=self.metric,
+                fixed_params=self.fixed_params,
+                engine_kwargs=self.engine_kwargs,
+                min_trades=self.min_trades,
+                use_genetic=self.use_genetic,
+                population_size=self.population_size,
+                generations=self.generations,
+                n_jobs=self.n_jobs,
+                progress_callback=self.progress.emit,
+                status_callback=self.status.emit,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit(result)
+
+
+class WfaMatrixWorker(QThread):
+    """Матричный WFO в фоне: перебор длин окон IS/OOS, прогресс и статус."""
+
+    finished_ok = Signal(object)   # WfaMatrixResult
+    failed = Signal(str)
+    progress = Signal(int, int)    # (сделано, всего) по всем бэктестам матрицы
+    status = Signal(str)           # "Ячейка 3/9: IS=180д, OOS=45д ..."
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        strategy_cls: Type[BaseStrategy],
+        matrix_config: WfaMatrixConfig,
+        metric: str,
+        target: str,
+        fixed_params: dict[str, Any],
+        grid: dict[str, list],
+        engine_kwargs: dict[str, float],
+        min_trades: int,
+        use_genetic: bool,
+        population_size: int = 30,
+        generations: int = 15,
+        n_jobs: int = 1,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.data = data
+        self.strategy_cls = strategy_cls
+        self.matrix_config = matrix_config
+        self.metric = metric
+        self.target = target
+        self.fixed_params = fixed_params
+        self.grid = grid
+        self.engine_kwargs = engine_kwargs
+        self.min_trades = min_trades
+        self.use_genetic = use_genetic
+        self.population_size = population_size
+        self.generations = generations
+        self.n_jobs = n_jobs
+
+    def run(self) -> None:
+        try:
+            result = run_wfa_matrix(
+                data=self.data,
+                strategy_cls=self.strategy_cls,
+                matrix_config=self.matrix_config,
+                grid=self.grid,
+                metric=self.metric,
+                target=self.target,
                 fixed_params=self.fixed_params,
                 engine_kwargs=self.engine_kwargs,
                 min_trades=self.min_trades,

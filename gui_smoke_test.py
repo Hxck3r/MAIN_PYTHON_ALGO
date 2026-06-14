@@ -105,6 +105,34 @@ def main() -> None:
     wait_worker(app, window)
     print("OK: применение параметров из окна WFA")
 
+    # --- Матричный WFO: перебор длин окон IS/OOS ------------------------ #
+    window.spin_mx_is_min.setValue(40)
+    window.spin_mx_is_max.setValue(80)
+    window.spin_mx_is_n.setValue(3)
+    window.spin_mx_oos_min.setValue(15)
+    window.spin_mx_oos_max.setValue(30)
+    window.spin_mx_oos_n.setValue(2)
+    assert "ячеек" in window.lbl_mx.text(), \
+        f"счётчик ячеек матрицы не обновился: {window.lbl_mx.text()!r}"
+    print(f"OK: счётчик матрицы: {window.lbl_mx.text()}")
+
+    window._run_wfa_matrix()
+    wait_worker(app, window)
+    mx = window.wfa_matrix_panel
+    assert mx.summary.rowCount() > 0, "сводка матрицы пуста"
+    assert mx._hover_info is not None, "тепловая карта матрицы не построена"
+    assert mx.combo_field.count() > 0, "нет выбора метрики матрицы"
+    assert window.tabs.currentWidget() is mx, "вкладка матрицы не активна"
+    # переключение отображаемой метрики не должно падать
+    mx.combo_field.setCurrentIndex(1)
+    print(f"OK: матричный WFO, строк сводки: {mx.summary.rowCount()}")
+
+    # клик по ячейке матрицы -> длины окон применяются к Walk-Forward
+    mx.cell_activated.emit(60, 20)
+    assert window.spin_wfa_is.value() == 60 and window.spin_wfa_oos.value() == 20, \
+        "длины окон из матрицы не применились к WFA"
+    print("OK: применение длин окон из матрицы к Walk-Forward")
+
     # --- Монте-Карло: все методы по сделкам последнего бэктеста --------- #
     assert window._last_result is not None, "нет сохранённого бэктеста для МК"
     mc = window.mc_panel

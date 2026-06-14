@@ -9,6 +9,7 @@
     monte_carlo      -- Монте-Карло анализ сделок (перемешивание/бутстрэп)
     optimizer        -- Grid Search и генетический алгоритм оптимизации
     walk_forward     -- Walk-Forward Analysis (скользящие окна IS/OOS)
+    wfa_matrix       -- матричный WFO (перебор длин окон, поиск плато)
     statistics       -- защита от переоптимизации (DSR, плато, permutation)
     visualizer       -- интерактивная визуализация (Plotly)
 """
@@ -56,6 +57,15 @@ from .walk_forward import (
     run_walk_forward,
     window_bounds,
 )
+from .wfa_matrix import (
+    MATRIX_FIELDS,
+    WfaMatrixCell,
+    WfaMatrixConfig,
+    WfaMatrixResult,
+    WfaMatrixStability,
+    run_wfa_matrix,
+    span_values,
+)
 
 __all__ = [
     "Bar",
@@ -101,6 +111,13 @@ __all__ = [
     "WindowResult",
     "run_walk_forward",
     "window_bounds",
+    "MATRIX_FIELDS",
+    "WfaMatrixCell",
+    "WfaMatrixConfig",
+    "WfaMatrixResult",
+    "WfaMatrixStability",
+    "run_wfa_matrix",
+    "span_values",
 ]
 
 __version__ = "0.1.0"

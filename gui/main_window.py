@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -38,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from backtester import (
+    MATRIX_FIELDS,
     BacktestResult,
     DataLoader,
     MonteCarloConfig,
@@ -45,7 +48,10 @@ from backtester import (
     OptimizationResult,
     WalkForwardConfig,
     WalkForwardResult,
+    WfaMatrixConfig,
+    WfaMatrixResult,
     generate_synthetic_data,
+    span_values,
     window_bounds,
 )
 from backtester.metrics import CRITERIA
@@ -56,12 +62,14 @@ from .mc_panel import McPanel
 from .opt_charts import OptimizationChartsPanel
 from .param_table import ParamTable
 from .results_panel import MetricsTable, OptimizationTable, TradesTable
+from .wfa_matrix_panel import WfaMatrixPanel
 from .wfa_panel import WfaPanel
 from .workers import (
     BacktestWorker,
     MonteCarloWorker,
     OptimizationWorker,
     WalkForwardWorker,
+    WfaMatrixWorker,
 )
 
 
@@ -88,7 +96,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
-        root.addWidget(self._build_settings_panel(), stretch=0)
+        # Настройки -- в прокручиваемой области: при нехватке высоты экрана
+        # появляется вертикальный скролл, а не наложение виджетов друг на друга.
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidget(self._build_settings_panel())
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.NoFrame)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_scroll.setFixedWidth(340)   # 320 контент + полоса прокрутки
+        root.addWidget(settings_scroll, stretch=0)
 
         right = QSplitter(Qt.Vertical)
         self.chart = ChartWidget()
@@ -106,7 +122,7 @@ class MainWindow(QMainWindow):
 
     def _build_settings_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setFixedWidth(320)
+        panel.setMinimumWidth(312)   # ширину задаёт область прокрутки-обёртка
         layout = QVBoxLayout(panel)
 
         # --- Данные ------------------------------------------------------#
@@ -230,6 +246,54 @@ class MainWindow(QMainWindow):
         self.chk_wfa_anchored.toggled.connect(self._update_wfa_label)
         for date_widget in (self.date_from, self.date_to):
             date_widget.dateChanged.connect(self._update_wfa_label)
+            date_widget.dateChanged.connect(self._update_matrix_label)
+
+        # --- Матричный WFO (перебор длин окон) ------------------------------ #
+        mx_box = QGroupBox("Матричный WFO (плато окон)")
+        mx_form = QFormLayout(mx_box)
+        self.spin_mx_is_min = QSpinBox(minimum=1, maximum=3650, value=90)
+        self.spin_mx_is_max = QSpinBox(minimum=1, maximum=3650, value=360)
+        self.spin_mx_is_n = QSpinBox(minimum=2, maximum=12, value=4)
+        self.spin_mx_oos_min = QSpinBox(minimum=1, maximum=3650, value=20)
+        self.spin_mx_oos_max = QSpinBox(minimum=1, maximum=3650, value=90)
+        self.spin_mx_oos_n = QSpinBox(minimum=2, maximum=12, value=4)
+        for spin in (self.spin_mx_is_min, self.spin_mx_is_max,
+                     self.spin_mx_oos_min, self.spin_mx_oos_max):
+            spin.setSuffix(" дн")
+        self.combo_mx_target = QComboBox()
+        for name, (label, _) in MATRIX_FIELDS.items():
+            self.combo_mx_target.addItem(label, name)
+        self.combo_mx_target.setToolTip(
+            "Метрика, по которой ищется плато стабильности на тепловой карте."
+        )
+        is_row = QHBoxLayout()
+        is_row.setContentsMargins(0, 0, 0, 0)
+        is_row.addWidget(self.spin_mx_is_min)
+        is_row.addWidget(QLabel("…"))
+        is_row.addWidget(self.spin_mx_is_max)
+        is_row.addWidget(QLabel("×"))
+        is_row.addWidget(self.spin_mx_is_n)
+        is_w = QWidget()
+        is_w.setLayout(is_row)
+        oos_row = QHBoxLayout()
+        oos_row.setContentsMargins(0, 0, 0, 0)
+        oos_row.addWidget(self.spin_mx_oos_min)
+        oos_row.addWidget(QLabel("…"))
+        oos_row.addWidget(self.spin_mx_oos_max)
+        oos_row.addWidget(QLabel("×"))
+        oos_row.addWidget(self.spin_mx_oos_n)
+        oos_w = QWidget()
+        oos_w.setLayout(oos_row)
+        self.lbl_mx = QLabel()
+        self.lbl_mx.setWordWrap(True)
+        mx_form.addRow("IS мин…макс×N:", is_w)
+        mx_form.addRow("OOS мин…макс×N:", oos_w)
+        mx_form.addRow("Цель плато:", self.combo_mx_target)
+        mx_form.addRow(self.lbl_mx)
+        layout.addWidget(mx_box)
+        for spin in (self.spin_mx_is_min, self.spin_mx_is_max, self.spin_mx_is_n,
+                     self.spin_mx_oos_min, self.spin_mx_oos_max, self.spin_mx_oos_n):
+            spin.valueChanged.connect(self._update_matrix_label)
 
         # --- Кнопки запуска -------------------------------------------------#
         self.btn_backtest = QPushButton("▶  Старт (бэктест)")
@@ -238,6 +302,12 @@ class MainWindow(QMainWindow):
         self.btn_optimize.clicked.connect(self._run_optimization)
         self.btn_wfa = QPushButton("📈  Walk-Forward")
         self.btn_wfa.clicked.connect(self._run_wfa)
+        self.btn_wfa_matrix = QPushButton("🔲  Матричный WFO")
+        self.btn_wfa_matrix.setToolTip(
+            "Перебор комбинаций длин окон IS/OOS — поиск плато стабильности.\n"
+            "Тепловая карта во вкладке «Матрица WFO»."
+        )
+        self.btn_wfa_matrix.clicked.connect(self._run_wfa_matrix)
         self.btn_mc = QPushButton("🎲  Монте-Карло")
         self.btn_mc.setToolTip(
             "Анализ устойчивости последнего бэктеста: перемешивание сделок,\n"
@@ -248,6 +318,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_backtest)
         layout.addWidget(self.btn_optimize)
         layout.addWidget(self.btn_wfa)
+        layout.addWidget(self.btn_wfa_matrix)
         layout.addWidget(self.btn_mc)
         layout.addStretch(1)
         return panel
@@ -292,6 +363,10 @@ class MainWindow(QMainWindow):
         self.wfa_panel = WfaPanel()
         self.wfa_panel.params_activated.connect(self._apply_and_backtest)
         self.tabs.addTab(self.wfa_panel, "Walk-Forward")
+
+        self.wfa_matrix_panel = WfaMatrixPanel()
+        self.wfa_matrix_panel.cell_activated.connect(self._apply_matrix_cell)
+        self.tabs.addTab(self.wfa_matrix_panel, "Матрица WFO")
 
         self.mc_panel = McPanel()
         self.mc_panel.run_requested.connect(self._run_monte_carlo)
@@ -374,6 +449,7 @@ class MainWindow(QMainWindow):
         self.btn_backtest.setEnabled(not busy)
         self.btn_optimize.setEnabled(not busy)
         self.btn_wfa.setEnabled(not busy)
+        self.btn_wfa_matrix.setEnabled(not busy)
         self.btn_mc.setEnabled(not busy)
         self.mc_panel.set_running(busy)
         self.progress.setVisible(busy)
@@ -665,6 +741,174 @@ class MainWindow(QMainWindow):
             f"OOS доходность {result.oos_stats.total_return_pct:.2f}%, "
             f"Sharpe {result.oos_stats.sharpe_ratio:.2f}, "
             f"MaxDD {result.oos_stats.max_drawdown_pct:.2f}%"
+        )
+        self._log(summary)
+        self.statusBar().showMessage(summary)
+
+    # ================================================================== #
+    # Матричный WFO (WFA Cluster Analysis)
+    # ================================================================== #
+    def _matrix_config(self) -> WfaMatrixConfig:
+        """Конфигурация матрицы из дат периода и диапазонов длин окон."""
+        start = pd.Timestamp(self.date_from.date().toPython())
+        end = pd.Timestamp(self.date_to.date().toPython()) + pd.Timedelta(days=1)
+        return WfaMatrixConfig(
+            start=start,
+            end=end,
+            is_days_list=span_values(
+                self.spin_mx_is_min.value(), self.spin_mx_is_max.value(),
+                self.spin_mx_is_n.value(),
+            ),
+            oos_days_list=span_values(
+                self.spin_mx_oos_min.value(), self.spin_mx_oos_max.value(),
+                self.spin_mx_oos_n.value(),
+            ),
+            anchored=self.chk_wfa_anchored.isChecked(),
+            step_days=self.spin_wfa_step.value(),
+        )
+
+    def _matrix_runnable_cells(self, config: WfaMatrixConfig) -> int:
+        """Сколько ячеек реально помещают >= 2 окон (для оценки объёма)."""
+        runnable = 0
+        for is_d, oos_d in config.cells():
+            try:
+                if len(window_bounds(config.window_config(is_d, oos_d))) >= 2:
+                    runnable += 1
+            except ValueError:
+                continue
+        return runnable
+
+    def _update_matrix_label(self) -> None:
+        """Живой счётчик ячеек и оценка числа прогонов матрицы."""
+        if not hasattr(self, "lbl_mx") or not hasattr(self, "param_table"):
+            return
+        try:
+            config = self._matrix_config()
+            config.validate()
+        except ValueError as exc:
+            self.lbl_mx.setText(f"⚠ {exc}")
+            self.lbl_mx.setStyleSheet("color: #ff9f43;")
+            return
+        n_is, n_oos = len(config.is_days_list), len(config.oos_days_list)
+        runnable = self._matrix_runnable_cells(config)
+        text = (
+            f"Сетка {n_is}×{n_oos} = {n_is * n_oos} ячеек "
+            f"(помещается {runnable})"
+        )
+        if runnable == 0:
+            text += " — уменьшите длины окон"
+            self.lbl_mx.setStyleSheet("color: #ff9f43;")
+        else:
+            self.lbl_mx.setStyleSheet("color: gray;")
+        self.lbl_mx.setText(text)
+
+    def _run_wfa_matrix(self) -> None:
+        data = self._selected_data()
+        if data is None:
+            return
+        try:
+            fixed, grid = self.param_table.optimization_setup()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Параметры", str(exc))
+            return
+        if not grid:
+            QMessageBox.information(
+                self, "Матричный WFO",
+                "Отметьте галочкой «Опт.» хотя бы один параметр "
+                "во вкладке «Параметры»",
+            )
+            return
+        try:
+            config = self._matrix_config()
+            config.validate()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Матричный WFO", str(exc))
+            return
+        runnable = self._matrix_runnable_cells(config)
+        if runnable == 0:
+            QMessageBox.warning(
+                self, "Матричный WFO",
+                "Ни одна комбинация длин окон не помещает достаточно окон: "
+                "уменьшите длины IS/OOS или расширьте период.",
+            )
+            return
+
+        use_genetic = self.combo_method.currentIndex() == 1
+        grid_total = int(np.prod([len(v) for v in grid.values()]))
+        runs = (
+            self.spin_population.value() * self.spin_generations.value()
+            if use_genetic else grid_total
+        )
+        # грубая оценка: число прогонов на ячейку × ячейки (без точного числа окон)
+        est = runnable * runs * 4
+        if est > 200_000:
+            answer = QMessageBox.question(
+                self, "Долгий расчёт",
+                f"Матричный WFO: ~{runnable} ячеек × {runs} прогонов на окно. "
+                f"На слабом CPU это может занять много времени. Продолжить?",
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        target = self.combo_mx_target.currentData()
+        self._set_busy(True, "Матричный WFO...")
+        self._log(
+            f"Матричный WFO: IS {list(config.is_days_list)}д × "
+            f"OOS {list(config.oos_days_list)}д "
+            f"({runnable} ячеек помещается), сетка {grid}, "
+            f"критерий «{self.combo_criterion.currentText()}», "
+            f"цель плато «{self.combo_mx_target.currentText()}»"
+        )
+        self._worker = WfaMatrixWorker(
+            data=data,
+            strategy_cls=self._strategy_cls(),
+            matrix_config=config,
+            metric=CRITERIA[self.combo_criterion.currentText()],
+            target=target,
+            fixed_params=fixed,
+            grid=grid,
+            engine_kwargs=self._engine_kwargs(),
+            min_trades=self.spin_min_trades.value(),
+            use_genetic=use_genetic,
+            population_size=self.spin_population.value(),
+            generations=self.spin_generations.value(),
+            n_jobs=self.spin_jobs.value(),
+            parent=self,
+        )
+        self._worker.progress.connect(self._on_wfa_progress)
+        self._worker.status.connect(
+            lambda text: self.statusBar().showMessage(text)
+        )
+        self._worker.finished_ok.connect(self._on_wfa_matrix_done)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _apply_matrix_cell(self, is_days: int, oos_days: int) -> None:
+        """Двойной клик по ячейке матрицы -> подставить длины окон в WFA."""
+        self.spin_wfa_is.setValue(int(is_days))
+        self.spin_wfa_oos.setValue(int(oos_days))
+        self._log(
+            f"Из матрицы выбраны длины окон: IS={is_days}д, OOS={oos_days}д "
+            f"(подставлены в Walk-Forward)"
+        )
+        self.statusBar().showMessage(
+            f"Длины окон IS={is_days}д / OOS={oos_days}д применены к Walk-Forward"
+        )
+
+    def _on_wfa_matrix_done(self, result: WfaMatrixResult) -> None:
+        self._set_busy(False)
+        self.wfa_matrix_panel.show_result(result)
+        self.tabs.setCurrentWidget(self.wfa_matrix_panel)
+        st = result.stability()
+        robust = result.robust_cell()
+        rec = (
+            f"IS={robust.is_days}д/OOS={robust.oos_days}д" if robust else "n/a"
+        )
+        summary = (
+            f"Матричный WFO завершён: ячеек {st.n_ran}/{st.n_cells}, "
+            f"avg WFE {st.avg_wfe_pct:.0f}%, прибыльных ячеек "
+            f"{st.pct_profitable_cells:.0f}%, плато {st.plateau_pct:.0f}%, "
+            f"рекомендация {rec}"
         )
         self._log(summary)
         self.statusBar().showMessage(summary)

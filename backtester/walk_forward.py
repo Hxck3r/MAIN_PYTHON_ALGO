@@ -542,6 +542,39 @@ def _spearman(x: np.ndarray, y: np.ndarray) -> float:
     return float((rx * ry).sum() / denom)
 
 
+def _make_cached_objective(
+    objective: Callable[[dict[str, Any]], float],
+    cache: dict[tuple, float],
+    is_start: pd.Timestamp,
+    is_end: pd.Timestamp,
+) -> Callable[[dict[str, Any]], float]:
+    """Обёртка objective с кэшем по (границы IS, набор параметров).
+
+    Матричный WFO перебирает много комбинаций длин IS/OOS, и одни и те же
+    IS-срезы регулярно повторяются между ячейками (например, при разной
+    длине OOS, но одинаковой длине IS совпадает часть окон). Кэш по
+    (is_start, is_end, параметры) исключает повторный прогон одного и того
+    же бэктеста в пределах общего словаря cache. Применяется только в
+    последовательном режиме: при пуле процессов score считается в воркерах.
+    """
+    base = (is_start.value, is_end.value)
+
+    def cached(params: dict[str, Any]) -> float:
+        key = base + tuple(sorted(params.items()))
+        hit = cache.get(key, _CACHE_MISS)
+        if hit is not _CACHE_MISS:
+            return hit
+        value = objective(params)
+        cache[key] = value
+        return value
+
+    return cached
+
+
+#: сентинел «промаха» кэша -- отличает отсутствие ключа от закэшированного NaN
+_CACHE_MISS = object()
+
+
 def _window_plateau_pct(
     is_scores: dict[tuple, float],
     best_params: dict[str, Any],
@@ -615,6 +648,8 @@ def run_walk_forward(
     warmup_bars: int = 0,
     progress_callback: Optional[ProgressCallback] = None,
     status_callback: Optional[StatusCallback] = None,
+    evaluator: Optional[Any] = None,
+    is_eval_cache: Optional[dict[tuple, float]] = None,
 ) -> WalkForwardResult:
     """Запускает полный walk-forward цикл.
 
@@ -632,6 +667,14 @@ def run_walk_forward(
 
     n_jobs: число процессов для параллельной оптимизации
     (0 -> авто: ядра - 1; 1 -> без параллельности).
+
+    evaluator: готовый ParallelEvaluator, общий на несколько прогонов WFA
+    (для матричного WFO -- пул создаётся один раз, данные пересылаются
+    воркерам однократно). Если задан, n_jobs игнорируется, а закрытие пула
+    остаётся на стороне вызывающего кода. is_eval_cache: общий словарь
+    кэша IS-оценок (только последовательный режим) -- исключает повторный
+    прогон совпадающих IS-срезов между ячейками матрицы.
+
     Остальные параметры аналогичны make_backtest_objective
     + WalkForwardConfig.
     """
@@ -651,9 +694,10 @@ def run_walk_forward(
     initial_cash = float(kwargs.get("cash", 10_000.0))
 
     # Пул процессов один на весь WFA: данные пересылаются воркерам один
-    # раз, для каждого окна меняются только границы IS-среза
-    evaluator = None
-    if n_jobs != 1:
+    # раз, для каждого окна меняются только границы IS-среза. Если пул
+    # передан извне (матричный WFO), переиспользуем его и не закрываем.
+    external_evaluator = evaluator is not None
+    if evaluator is None and n_jobs != 1:
         from .parallel import ParallelEvaluator
 
         evaluator = ParallelEvaluator(
@@ -713,6 +757,11 @@ def run_walk_forward(
             if evaluator is not None:
                 # воркеры пула сами вырежут IS-срез из полных данных
                 evaluator.set_bounds(is_start, is_end)
+            elif is_eval_cache is not None:
+                # последовательный режим: кэшируем IS-оценки между ячейками
+                objective = _make_cached_objective(
+                    objective, is_eval_cache, is_start, is_end
+                )
             inner_progress = lambda done, _total, _k=k: report(_k, done)  # noqa: E731
             if use_genetic:
                 optimizer: GridSearchOptimizer | GeneticOptimizer = GeneticOptimizer(
@@ -802,7 +851,7 @@ def run_walk_forward(
                 trades_parts.append(oos_trades)
             report(k, inner_total)
     finally:
-        if evaluator is not None:
+        if evaluator is not None and not external_evaluator:
             evaluator.close()
 
     if not windows:
