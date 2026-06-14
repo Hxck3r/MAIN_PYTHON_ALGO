@@ -44,6 +44,7 @@ from .optimizer import (
     GeneticOptimizer,
     GridSearchOptimizer,
     IntParam,
+    StopRequested,
     make_backtest_objective,
 )
 
@@ -51,6 +52,8 @@ from .optimizer import (
 ProgressCallback = Callable[[int, int], None]
 #: текстовый статус для GUI ("Окно 3/10: оптимизация...")
 StatusCallback = Callable[[str], None]
+#: коллбек прерывания: возвращает True, если расчёт нужно остановить
+ShouldStop = Callable[[], bool]
 
 #: минимум баров в IS/OOS срезе, чтобы окно имело смысл
 MIN_IS_BARS = 50
@@ -648,6 +651,7 @@ def run_walk_forward(
     warmup_bars: int = 0,
     progress_callback: Optional[ProgressCallback] = None,
     status_callback: Optional[StatusCallback] = None,
+    should_stop: Optional[ShouldStop] = None,
     evaluator: Optional[Any] = None,
     is_eval_cache: Optional[dict[tuple, float]] = None,
 ) -> WalkForwardResult:
@@ -733,6 +737,8 @@ def run_walk_forward(
 
     try:
         for k, (is_start, is_end, oos_start, oos_end) in enumerate(bounds):
+            if should_stop is not None and should_stop():
+                raise StopRequested()
             is_df = data[(data.index >= is_start) & (data.index < is_end)]
             oos_df = data[(data.index >= oos_start) & (data.index < oos_end)]
             if len(is_df) < MIN_IS_BARS or len(oos_df) < MIN_OOS_BARS:
@@ -772,12 +778,14 @@ def run_walk_forward(
                     seed=seed + k,            # свой поток случайности на окно
                     progress_callback=inner_progress,
                     batch_evaluator=evaluator,
+                    should_stop=should_stop,
                 )
             else:
                 optimizer = GridSearchOptimizer(
                     objective, param_grid=grid,
                     progress_callback=inner_progress,
                     batch_evaluator=evaluator,
+                    should_stop=should_stop,
                 )
             opt = optimizer.optimize()
             valid = bool(opt.best_params) and math.isfinite(opt.best_score)

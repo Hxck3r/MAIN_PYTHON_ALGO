@@ -18,6 +18,7 @@ from backtester import (
     GeneticOptimizer,
     GridSearchOptimizer,
     MonteCarloConfig,
+    StopRequested,
     WalkForwardConfig,
     WfaMatrixConfig,
     deflated_sharpe_from_optimization,
@@ -65,10 +66,15 @@ class BacktestWorker(QThread):
 
 
 class OptimizationWorker(QThread):
-    """Оптимизация (Grid Search или генетика) в фоне с прогрессом."""
+    """Оптимизация (Grid Search или генетика) в фоне с прогрессом.
+
+    Остановка: requestInterruption() из GUI-потока -> оптимизатор замечает
+    её в точке проверки и поднимает StopRequested -> сигнал stopped.
+    """
 
     finished_ok = Signal(object)   # OptimizationResult
     failed = Signal(str)
+    stopped = Signal()             # расчёт прерван пользователем
     progress = Signal(int, int)    # (сделано, всего)
 
     def __init__(
@@ -129,6 +135,7 @@ class OptimizationWorker(QThread):
                     seed=42,
                     progress_callback=self.progress.emit,
                     batch_evaluator=evaluator,
+                    should_stop=self.isInterruptionRequested,
                 )
             else:
                 optimizer = GridSearchOptimizer(
@@ -136,8 +143,12 @@ class OptimizationWorker(QThread):
                     param_grid=self.grid,
                     progress_callback=self.progress.emit,
                     batch_evaluator=evaluator,
+                    should_stop=self.isInterruptionRequested,
                 )
             result = optimizer.optimize()
+        except StopRequested:
+            self.stopped.emit()
+            return
         except Exception as exc:
             self.failed.emit(str(exc))
             return
@@ -164,6 +175,7 @@ class MonteCarloWorker(QThread):
 
     finished_ok = Signal(object)   # MonteCarloResult
     failed = Signal(str)
+    stopped = Signal()             # расчёт прерван пользователем
     progress = Signal(int, int)    # (симуляций сделано, всего)
 
     def __init__(
@@ -179,8 +191,12 @@ class MonteCarloWorker(QThread):
     def run(self) -> None:
         try:
             mc = run_monte_carlo(
-                self.result, self.config, progress_callback=self.progress.emit
+                self.result, self.config, progress_callback=self.progress.emit,
+                should_stop=self.isInterruptionRequested,
             )
+        except StopRequested:
+            self.stopped.emit()
+            return
         except Exception as exc:
             self.failed.emit(str(exc))
             return
@@ -192,6 +208,7 @@ class WalkForwardWorker(QThread):
 
     finished_ok = Signal(object)   # WalkForwardResult
     failed = Signal(str)
+    stopped = Signal()             # расчёт прерван пользователем
     progress = Signal(int, int)    # (сделано, всего) по всем окнам сквозно
     status = Signal(str)           # "Окно 3/10: оптимизация IS ..."
 
@@ -242,7 +259,11 @@ class WalkForwardWorker(QThread):
                 n_jobs=self.n_jobs,
                 progress_callback=self.progress.emit,
                 status_callback=self.status.emit,
+                should_stop=self.isInterruptionRequested,
             )
+        except StopRequested:
+            self.stopped.emit()
+            return
         except Exception as exc:
             self.failed.emit(str(exc))
             return
@@ -254,6 +275,7 @@ class WfaMatrixWorker(QThread):
 
     finished_ok = Signal(object)   # WfaMatrixResult
     failed = Signal(str)
+    stopped = Signal()             # расчёт прерван пользователем
     progress = Signal(int, int)    # (сделано, всего) по всем бэктестам матрицы
     status = Signal(str)           # "Ячейка 3/9: IS=180д, OOS=45д ..."
 
@@ -307,7 +329,11 @@ class WfaMatrixWorker(QThread):
                 n_jobs=self.n_jobs,
                 progress_callback=self.progress.emit,
                 status_callback=self.status.emit,
+                should_stop=self.isInterruptionRequested,
             )
+        except StopRequested:
+            self.stopped.emit()
+            return
         except Exception as exc:
             self.failed.emit(str(exc))
             return

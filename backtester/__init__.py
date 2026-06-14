@@ -36,6 +36,7 @@ from .optimizer import (
     GridSearchOptimizer,
     IntParam,
     OptimizationResult,
+    StopRequested,
     make_backtest_objective,
 )
 from .parallel import ParallelEvaluator, default_jobs
@@ -94,6 +95,7 @@ __all__ = [
     "GridSearchOptimizer",
     "IntParam",
     "OptimizationResult",
+    "StopRequested",
     "make_backtest_objective",
     "ParallelEvaluator",
     "default_jobs",

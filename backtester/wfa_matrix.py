@@ -47,8 +47,10 @@ import numpy as np
 import pandas as pd
 
 from .base_strategy import BaseStrategy
+from .optimizer import StopRequested
 from .walk_forward import (
     ProgressCallback,
+    ShouldStop,
     StatusCallback,
     WalkForwardConfig,
     WalkForwardResult,
@@ -450,6 +452,7 @@ def run_wfa_matrix(
     keep_results: bool = False,
     progress_callback: Optional[ProgressCallback] = None,
     status_callback: Optional[StatusCallback] = None,
+    should_stop: Optional[ShouldStop] = None,
 ) -> WfaMatrixResult:
     """Прогоняет walk-forward для каждой комбинации длин IS/OOS.
 
@@ -532,6 +535,8 @@ def run_wfa_matrix(
     cells: list[WfaMatrixCell] = list(skipped)
     try:
         for k, (is_days, oos_days, n_bounds) in enumerate(planned):
+            if should_stop is not None and should_stop():
+                raise StopRequested()
             status(
                 f"Ячейка {k + 1}/{len(planned)}: IS={is_days}д, OOS={oos_days}д "
                 f"({n_bounds} окон)"
@@ -552,6 +557,7 @@ def run_wfa_matrix(
                     generations=generations, seed=seed,
                     warmup_bars=warmup_bars,
                     progress_callback=cell_progress,
+                    should_stop=should_stop,
                     evaluator=evaluator, is_eval_cache=is_eval_cache,
                 )
             except ValueError as exc:

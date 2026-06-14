@@ -266,6 +266,7 @@ def run_monte_carlo(
     result: "BacktestResult",
     config: Optional[MonteCarloConfig] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> MonteCarloResult:
     """Монте-Карло анализ по сделкам завершённого бэктеста.
 
@@ -274,7 +275,10 @@ def run_monte_carlo(
     result:            BacktestResult с непустым списком сделок.
     config:            настройки (методы, пороги, число симуляций).
     progress_callback: callable(done, total) -- прогресс по симуляциям.
+    should_stop:       callable() -> bool; если вернёт True между чанками
+                       симуляций, расчёт прерывается через StopRequested.
     """
+    from .optimizer import StopRequested
     config = config or MonteCarloConfig()
     config.validate()
 
@@ -336,6 +340,8 @@ def run_monte_carlo(
         done += size
         if progress_callback is not None:
             progress_callback(done, n_sims)
+        if should_stop is not None and should_stop():
+            raise StopRequested()
 
     envelope_pool = np.vstack(stored_curves)
     envelope = np.percentile(envelope_pool, ENVELOPE_PERCENTILES, axis=0)

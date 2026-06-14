@@ -131,6 +131,17 @@ class OptimizationResult:
 # ---------------------------------------------------------------------- #
 #: коллбек прогресса: (сделано, всего) -- для прогресс-баров в GUI
 ProgressCallback = Callable[[int, int], None]
+#: коллбек прерывания: возвращает True, если расчёт нужно остановить
+ShouldStop = Callable[[], bool]
+
+
+class StopRequested(Exception):
+    """Кооперативная остановка: пользователь прервал расчёт через should_stop.
+
+    Поднимается оптимизаторами и циклами WFA/WFO в точках проверки
+    should_stop(). Не ошибка -- вызывающий код (GUI-воркер) ловит её
+    отдельно от Exception и сообщает «остановлено», а не «упало».
+    """
 
 
 class BaseOptimizer(ABC):
@@ -149,16 +160,23 @@ class BaseOptimizer(ABC):
         verbose: bool = False,
         progress_callback: Optional[ProgressCallback] = None,
         batch_evaluator: Optional[Any] = None,
+        should_stop: Optional[ShouldStop] = None,
     ) -> None:
         self.objective = objective
         self.maximize = maximize
         self.verbose = verbose
         self.progress_callback = progress_callback
         self.batch_evaluator = batch_evaluator
+        self.should_stop = should_stop
 
     def _report_progress(self, done: int, total: int) -> None:
         if self.progress_callback is not None:
             self.progress_callback(done, total)
+
+    def _check_stop(self) -> None:
+        """Поднимает StopRequested, если запрошена остановка."""
+        if self.should_stop is not None and self.should_stop():
+            raise StopRequested()
 
     @abstractmethod
     def optimize(self) -> OptimizationResult:
@@ -206,10 +224,12 @@ class GridSearchOptimizer(BaseOptimizer):
         verbose: bool = False,
         progress_callback: Optional[ProgressCallback] = None,
         batch_evaluator: Optional[Any] = None,
+        should_stop: Optional[ShouldStop] = None,
     ) -> None:
         super().__init__(
             objective, maximize=maximize, verbose=verbose,
             progress_callback=progress_callback, batch_evaluator=batch_evaluator,
+            should_stop=should_stop,
         )
         self.param_grid = {name: list(values) for name, values in param_grid.items()}
         if not self.param_grid:
@@ -240,6 +260,7 @@ class GridSearchOptimizer(BaseOptimizer):
                 if self.verbose:
                     print(f"  [{k}/{len(combos)}] новый лучший {score:.4f}: {params}")
             self._report_progress(k, len(combos))
+            self._check_stop()
 
         return OptimizationResult(
             best_params=best_params,
@@ -279,10 +300,12 @@ class GeneticOptimizer(BaseOptimizer):
         verbose: bool = False,
         progress_callback: Optional[ProgressCallback] = None,
         batch_evaluator: Optional[Any] = None,
+        should_stop: Optional[ShouldStop] = None,
     ) -> None:
         super().__init__(
             objective, maximize=maximize, verbose=verbose,
             progress_callback=progress_callback, batch_evaluator=batch_evaluator,
+            should_stop=should_stop,
         )
         if not param_space:
             raise ValueError("Пустое пространство параметров")
@@ -356,6 +379,7 @@ class GeneticOptimizer(BaseOptimizer):
         best_score = -math.inf if self.maximize else math.inf
 
         for gen in range(self.generations):
+            self._check_stop()
             evaluate_generation(population)
             scored = [
                 (ind, cache[tuple(sorted(ind.items()))]) for ind in population

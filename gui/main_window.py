@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
         self._worker: Optional[Any] = None               # активный поток
         self._last_opt: Optional[OptimizationResult] = None
         self._last_result: Optional[BacktestResult] = None  # для Монте-Карло
+        self._task_started: Optional[float] = None       # старт расчёта (для ETA)
 
         self._build_ui()
         self._on_strategy_changed()
@@ -115,7 +117,8 @@ class MainWindow(QMainWindow):
         root.addWidget(right, stretch=1)
 
         self.progress = QProgressBar()
-        self.progress.setMaximumWidth(260)
+        self.progress.setMaximumWidth(300)
+        self.progress.setTextVisible(True)
         self.progress.setVisible(False)
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().showMessage("Готов")
@@ -315,11 +318,22 @@ class MainWindow(QMainWindow):
             "Настройки — во вкладке «Монте-Карло»."
         )
         self.btn_mc.clicked.connect(self._run_monte_carlo_clicked)
+        self.btn_stop = QPushButton("■  Стоп")
+        self.btn_stop.setToolTip(
+            "Прервать текущий расчёт (оптимизацию / WFA / WFO / Монте-Карло).\n"
+            "Останавливается на ближайшей контрольной точке — уже частично\n"
+            "посчитанные окна/ячейки не теряются мгновенно, но результат\n"
+            "прерванного прогона не сохраняется."
+        )
+        self.btn_stop.setStyleSheet("color: #ff5c5c;")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self._request_stop)
         layout.addWidget(self.btn_backtest)
         layout.addWidget(self.btn_optimize)
         layout.addWidget(self.btn_wfa)
         layout.addWidget(self.btn_wfa_matrix)
         layout.addWidget(self.btn_mc)
+        layout.addWidget(self.btn_stop)
         layout.addStretch(1)
         return panel
 
@@ -451,11 +465,58 @@ class MainWindow(QMainWindow):
         self.btn_wfa.setEnabled(not busy)
         self.btn_wfa_matrix.setEnabled(not busy)
         self.btn_mc.setEnabled(not busy)
+        self.btn_stop.setEnabled(busy)
         self.mc_panel.set_running(busy)
         self.progress.setVisible(busy)
         if busy:
+            self._task_started = time.monotonic()
             self.progress.setRange(0, 0)  # «бегунок», пока нет точного прогресса
+            self.progress.setFormat("…")
+        else:
+            self._task_started = None
+            self.progress.reset()
         self.statusBar().showMessage(message or ("Расчёт..." if busy else "Готов"))
+
+    # ------------------------------------------------------------------ #
+    # Прогресс и оценка оставшегося времени (ETA)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        """Человекочитаемая длительность: «45 с», «2 мин 05 с», «1 ч 12 мин»."""
+        secs = int(round(max(seconds, 0)))
+        if secs < 60:
+            return f"{secs} с"
+        minutes, secs = divmod(secs, 60)
+        if minutes < 60:
+            return f"{minutes} мин {secs:02d} с"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours} ч {minutes:02d} мин"
+
+    def _eta_text(self, done: int, total: int) -> str:
+        """Оценка оставшегося времени по средней скорости с начала расчёта."""
+        if self._task_started is None or done <= 0 or total <= 0 or done >= total:
+            return ""
+        elapsed = time.monotonic() - self._task_started
+        if elapsed < 1.0:                       # рано: оценка ещё нестабильна
+            return ""
+        remaining = (total - done) * (elapsed / done)
+        return self._format_duration(remaining)
+
+    def _set_progress(self, done: int, total: int, status: Optional[str] = None) -> None:
+        """Обновляет прогресс-бар (проценты + ETA) и при необходимости статус.
+
+        ETA всегда показывается в самом прогресс-баре; для задач без своего
+        текстового статуса (оптимизация, Монте-Карло) дублируется в строке.
+        """
+        self.progress.setRange(0, total)
+        self.progress.setValue(done)
+        eta = self._eta_text(done, total)
+        pct = (done / total * 100.0) if total else 0.0
+        self.progress.setFormat(f"{pct:.0f}%" + (f"  •  ~{eta}" if eta else ""))
+        if status is not None:
+            if eta:
+                status += f"  •  осталось ~{eta}"
+            self.statusBar().showMessage(status)
 
     def _run_backtest(self) -> None:
         data = self._selected_data()
@@ -526,6 +587,7 @@ class MainWindow(QMainWindow):
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_optimization_done)
         self._worker.failed.connect(self._on_failed)
+        self._worker.stopped.connect(self._on_stopped)
         self._worker.start()
 
     # ================================================================== #
@@ -653,6 +715,7 @@ class MainWindow(QMainWindow):
         )
         self._worker.finished_ok.connect(self._on_wfa_done)
         self._worker.failed.connect(self._on_failed)
+        self._worker.stopped.connect(self._on_stopped)
         self._worker.start()
 
     # ================================================================== #
@@ -695,11 +758,11 @@ class MainWindow(QMainWindow):
         self._worker.progress.connect(self._on_progress_simple)
         self._worker.finished_ok.connect(self._on_mc_done)
         self._worker.failed.connect(self._on_failed)
+        self._worker.stopped.connect(self._on_stopped)
         self._worker.start()
 
     def _on_progress_simple(self, done: int, total: int) -> None:
-        self.progress.setRange(0, total)
-        self.progress.setValue(done)
+        self._set_progress(done, total, status=f"Монте-Карло: {done}/{total}")
 
     def _on_mc_done(self, result: MonteCarloResult) -> None:
         self._set_busy(False)
@@ -724,8 +787,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(summary)
 
     def _on_wfa_progress(self, done: int, total: int) -> None:
-        self.progress.setRange(0, total)
-        self.progress.setValue(done)
+        # текстовый статус («Окно 3/10…») приходит из status-сигнала воркера,
+        # поэтому здесь обновляем только бар с процентами и ETA
+        self._set_progress(done, total)
 
     def _on_wfa_done(self, result: WalkForwardResult) -> None:
         self._set_busy(False)
@@ -881,6 +945,7 @@ class MainWindow(QMainWindow):
         )
         self._worker.finished_ok.connect(self._on_wfa_matrix_done)
         self._worker.failed.connect(self._on_failed)
+        self._worker.stopped.connect(self._on_stopped)
         self._worker.start()
 
     def _apply_matrix_cell(self, is_days: int, oos_days: int) -> None:
@@ -917,9 +982,7 @@ class MainWindow(QMainWindow):
     # Обработка результатов
     # ================================================================== #
     def _on_progress(self, done: int, total: int) -> None:
-        self.progress.setRange(0, total)
-        self.progress.setValue(done)
-        self.statusBar().showMessage(f"Оптимизация: {done}/{total}")
+        self._set_progress(done, total, status=f"Оптимизация: {done}/{total}")
 
     def _on_backtest_done(self, result: BacktestResult) -> None:
         self._set_busy(False)
@@ -981,6 +1044,22 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         self._log(f"ОШИБКА: {message}")
         QMessageBox.critical(self, "Ошибка", message)
+
+    def _request_stop(self) -> None:
+        """Кнопка «Стоп»: кооперативно прерывает активный расчёт."""
+        worker = self._worker
+        if worker is None or not worker.isRunning():
+            return
+        worker.requestInterruption()
+        self.btn_stop.setEnabled(False)     # повторные нажатия не нужны
+        self._log("Запрошена остановка — дождитесь завершения текущего шага…")
+        self.statusBar().showMessage("Остановка…")
+
+    def _on_stopped(self) -> None:
+        """Воркер подтвердил остановку (сигнал stopped)."""
+        self._set_busy(False)
+        self._log("Расчёт остановлен пользователем")
+        self.statusBar().showMessage("Остановлено")
 
     # ================================================================== #
     def _on_strategy_changed(self) -> None:
