@@ -8,9 +8,10 @@
     metrics          -- расчёт торговых метрик по эквити и сделкам
     monte_carlo      -- Монте-Карло анализ сделок (перемешивание/бутстрэп)
     optimizer        -- Grid Search и генетический алгоритм оптимизации
-    walk_forward     -- Walk-Forward Analysis (скользящие окна IS/OOS)
+    walk_forward     -- Walk-Forward Analysis (скользящие окна IS/OOS с purge)
     wfa_matrix       -- матричный WFO (перебор длин окон, поиск плато)
-    statistics       -- защита от переоптимизации (DSR, плато, permutation)
+    statistics       -- защита от переоптимизации (DSR, MinTRL, haircut, плато)
+    pbo              -- вероятность переподгонки (PBO) методом CSCV
     visualizer       -- интерактивная визуализация (Plotly)
 """
 from .base_strategy import Bar, BaseStrategy
@@ -42,14 +43,26 @@ from .optimizer import (
 from .parallel import ParallelEvaluator, default_jobs
 from .statistics import (
     DeflatedSharpeResult,
+    HaircutSharpeResult,
+    MinTRLResult,
     PermutationTestResult,
     deflated_sharpe_from_optimization,
     deflated_sharpe_ratio,
+    effective_number_of_trials,
     expected_max_sharpe,
+    haircut_sharpe_ratio,
+    min_track_record_length,
     permutation_test,
     permute_bars,
     probabilistic_sharpe_ratio,
     select_plateau_params,
+)
+from .pbo import (
+    PBOResult,
+    build_trial_returns,
+    pbo_from_optimization,
+    probability_of_backtest_overfitting,
+    unique_configs,
 )
 from .walk_forward import (
     WalkForwardConfig,
@@ -100,14 +113,24 @@ __all__ = [
     "ParallelEvaluator",
     "default_jobs",
     "DeflatedSharpeResult",
+    "HaircutSharpeResult",
+    "MinTRLResult",
     "PermutationTestResult",
     "deflated_sharpe_from_optimization",
     "deflated_sharpe_ratio",
+    "effective_number_of_trials",
     "expected_max_sharpe",
+    "haircut_sharpe_ratio",
+    "min_track_record_length",
     "permutation_test",
     "permute_bars",
     "probabilistic_sharpe_ratio",
     "select_plateau_params",
+    "PBOResult",
+    "build_trial_returns",
+    "pbo_from_optimization",
+    "probability_of_backtest_overfitting",
+    "unique_configs",
     "WalkForwardConfig",
     "WalkForwardResult",
     "WindowResult",

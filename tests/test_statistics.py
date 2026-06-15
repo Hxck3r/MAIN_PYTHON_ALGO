@@ -1,6 +1,8 @@
 """Тесты статистики против переоптимизации: PSR/DSR, плато, permutation."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -9,8 +11,11 @@ from backtester import (
     GridSearchOptimizer,
     deflated_sharpe_from_optimization,
     deflated_sharpe_ratio,
+    effective_number_of_trials,
     expected_max_sharpe,
+    haircut_sharpe_ratio,
     make_backtest_objective,
+    min_track_record_length,
     permutation_test,
     permute_bars,
     probabilistic_sharpe_ratio,
@@ -103,6 +108,66 @@ def test_deflated_sharpe_from_optimization(synth_1h):
     assert dsr.dsr <= dsr.psr_zero + 1e-12
     # вердикт печатается в отчёте
     assert "Deflated Sharpe" in str(dsr)
+
+
+# --- Канонический DSR (дисперсия по испытаниям + эффективное N) ----------- #
+def test_effective_trials_collapses_duplicates():
+    """Дубликаты конфигов не считаются независимыми испытаниями."""
+    rng = np.random.default_rng(3)
+    base = rng.normal(0.0, 0.01, size=(400, 5))   # 5 независимых сигналов
+    matrix = np.hstack([base, base])               # 10 колонок = 5 дублей пар
+    assert effective_number_of_trials(matrix, corr_threshold=0.95) == 5
+
+
+def test_dsr_canonical_uses_trial_variance():
+    """Канонический путь: больше разброс Sharpe по испытаниям -> ниже DSR."""
+    rng = np.random.default_rng(4)
+    returns = rng.normal(0.003, 0.01, size=500)
+    small = np.linspace(0.04, 0.06, 50)            # узкий разброс trial-Sharpe
+    large = np.linspace(-0.10, 0.20, 50)           # широкий разброс
+    res_small = deflated_sharpe_ratio(returns, np.empty(0), trial_sharpes=small)
+    res_large = deflated_sharpe_ratio(returns, np.empty(0), trial_sharpes=large)
+    assert res_small.canonical and res_large.canonical
+    assert res_small.sr_variance == pytest.approx(np.var(small, ddof=1))
+    # шире разброс испытаний -> выше порог шума -> ниже уверенность
+    assert res_large.expected_max_sr > res_small.expected_max_sr
+    assert res_large.dsr <= res_small.dsr
+
+
+# --- MinTRL ---------------------------------------------------------------- #
+def test_mintrl_sufficient_for_strong_long_track():
+    rng = np.random.default_rng(5)
+    returns = rng.normal(0.01, 0.01, size=1000)    # SR за период ~1
+    res = min_track_record_length(returns, benchmark_sr=0.0, confidence=0.95)
+    assert res.sufficient
+    assert res.min_length < res.n_observations
+
+
+def test_mintrl_infinite_without_edge():
+    rng = np.random.default_rng(6)
+    returns = rng.normal(0.0, 0.01, size=200)
+    returns = returns - returns.mean()             # ровно нулевой Sharpe
+    res = min_track_record_length(returns, benchmark_sr=0.0)
+    assert not res.sufficient
+    assert math.isinf(res.min_length)
+
+
+# --- Haircut Sharpe -------------------------------------------------------- #
+def test_haircut_zero_for_single_trial():
+    rng = np.random.default_rng(7)
+    returns = rng.normal(0.01, 0.01, size=500)
+    res = haircut_sharpe_ratio(returns, n_trials=1)
+    assert res.haircut_pct == pytest.approx(0.0, abs=1e-6)
+
+
+def test_haircut_grows_with_trials():
+    rng = np.random.default_rng(8)
+    returns = rng.normal(0.005, 0.01, size=500)
+    h1 = haircut_sharpe_ratio(returns, n_trials=1)
+    h100 = haircut_sharpe_ratio(returns, n_trials=200)
+    assert h100.haircut_pct >= h1.haircut_pct
+    assert h100.adjusted_sr_annual <= h1.adjusted_sr_annual
+    assert "Haircut Sharpe" in str(h100)
 
 
 def test_permutation_test_runs(synth_1h):

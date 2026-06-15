@@ -47,6 +47,7 @@ from backtester import (
     MonteCarloConfig,
     MonteCarloResult,
     OptimizationResult,
+    PBOResult,
     WalkForwardConfig,
     WalkForwardResult,
     WfaMatrixConfig,
@@ -61,6 +62,7 @@ from strategies import STRATEGIES
 from .chart_widget import ChartWidget
 from .mc_panel import McPanel
 from .opt_charts import OptimizationChartsPanel
+from .pbo_panel import PboPanel
 from .param_table import ParamTable
 from .results_panel import MetricsTable, OptimizationTable, TradesTable
 from .wfa_matrix_panel import WfaMatrixPanel
@@ -69,6 +71,7 @@ from .workers import (
     BacktestWorker,
     MonteCarloWorker,
     OptimizationWorker,
+    PboWorker,
     WalkForwardWorker,
     WfaMatrixWorker,
 )
@@ -87,6 +90,11 @@ class MainWindow(QMainWindow):
         self._last_wfa: Optional[WalkForwardResult] = None       # для ИИ-контекста
         self._last_matrix: Optional[WfaMatrixResult] = None      # для ИИ-контекста
         self._last_mc: Optional[MonteCarloResult] = None         # для ИИ-контекста
+        self._last_pbo: Optional[PBOResult] = None               # для ИИ-контекста
+        # снимок контекста последней оптимизации (данные/стратегия/движок) --
+        # нужен, чтобы PBO прогнал её конфигурации на тех же условиях, даже
+        # если пользователь после оптимизации сменил период/стратегию в GUI.
+        self._last_opt_context: Optional[dict[str, Any]] = None
         self._ai_window: Optional[Any] = None            # окно ИИ-ассистента
         self._task_started: Optional[float] = None       # старт расчёта (для ETA)
 
@@ -334,6 +342,14 @@ class MainWindow(QMainWindow):
             "Настройки — во вкладке «Монте-Карло»."
         )
         self.btn_mc.clicked.connect(self._run_monte_carlo_clicked)
+        self.btn_pbo = QPushButton("🔬  PBO (переподгонка)")
+        self.btn_pbo.setToolTip(
+            "Probability of Backtest Overfitting по последней оптимизации:\n"
+            "систематически ли лучший по IS проваливается на OOS (метод CSCV).\n"
+            "PBO ~ 0 — отбор переносится на новые данные; ≥0.5 — переподгонка.\n"
+            "Настройки и графики — во вкладке «PBO»."
+        )
+        self.btn_pbo.clicked.connect(self._run_pbo_clicked)
         self.btn_stop = QPushButton("■  Стоп")
         self.btn_stop.setToolTip(
             "Прервать текущий расчёт (оптимизацию / WFA / WFO / Монте-Карло).\n"
@@ -349,6 +365,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_wfa)
         layout.addWidget(self.btn_wfa_matrix)
         layout.addWidget(self.btn_mc)
+        layout.addWidget(self.btn_pbo)
         layout.addWidget(self.btn_stop)
         layout.addStretch(1)
         return panel
@@ -401,6 +418,10 @@ class MainWindow(QMainWindow):
         self.mc_panel = McPanel()
         self.mc_panel.run_requested.connect(self._run_monte_carlo)
         self.tabs.addTab(self.mc_panel, "Монте-Карло")
+
+        self.pbo_panel = PboPanel()
+        self.pbo_panel.run_requested.connect(self._run_pbo)
+        self.tabs.addTab(self.pbo_panel, "PBO")
 
         self.log = QPlainTextEdit(readOnly=True)
         self.tabs.addTab(self.log, "Журнал")
@@ -481,8 +502,10 @@ class MainWindow(QMainWindow):
         self.btn_wfa.setEnabled(not busy)
         self.btn_wfa_matrix.setEnabled(not busy)
         self.btn_mc.setEnabled(not busy)
+        self.btn_pbo.setEnabled(not busy)
         self.btn_stop.setEnabled(busy)
         self.mc_panel.set_running(busy)
+        self.pbo_panel.set_running(busy)
         self.progress.setVisible(busy)
         if busy:
             self._task_started = time.monotonic()
@@ -585,6 +608,13 @@ class MainWindow(QMainWindow):
         self._log(
             f"Оптимизация ({self.combo_method.currentText()}): сетка {grid}, "
             f"критерий «{self.combo_criterion.currentText()}»"
+        )
+        # снимок контекста для PBO: те же данные/стратегия/движок/фикс-параметры
+        self._last_opt_context = dict(
+            data=data,
+            strategy_cls=self._strategy_cls(),
+            fixed_params=fixed,
+            engine_kwargs=self._engine_kwargs(),
         )
         self._worker = OptimizationWorker(
             data=data,
@@ -800,6 +830,77 @@ class MainWindow(QMainWindow):
             self._log(
                 "⚠ Монте-Карло: исходный бэктест в топ-5% облака симуляций — "
                 "кривая, вероятно, обязана удачному порядку сделок (переподгонка)"
+            )
+        self.statusBar().showMessage(summary)
+
+    # ================================================================== #
+    # PBO (Probability of Backtest Overfitting, CSCV)
+    # ================================================================== #
+    def _run_pbo_clicked(self) -> None:
+        """Кнопка слева: открыть вкладку PBO и запустить с её настройками."""
+        self.tabs.setCurrentWidget(self.pbo_panel)
+        self._run_pbo(self.pbo_panel._even_splits())
+
+    def _run_pbo(self, n_splits: int) -> None:
+        if self._last_opt is None or self._last_opt_context is None:
+            QMessageBox.information(
+                self, "PBO",
+                "Сначала выполните оптимизацию (кнопка «Оптимизация») — PBO "
+                "оценивает переподгонку по её испытаниям.",
+            )
+            return
+        from backtester.pbo import unique_configs
+        n_configs = len(unique_configs(self._last_opt.history))
+        if n_configs < 2:
+            QMessageBox.warning(
+                self, "PBO",
+                f"В оптимизации только {n_configs} различных конфигураций — "
+                f"для CSCV нужно минимум 2. Отметьте больше значений параметров.",
+            )
+            return
+
+        self._set_busy(True, "PBO (CSCV)...")
+        self._log(
+            f"PBO: CSCV по {n_configs} конфигурациям, S={n_splits} блоков "
+            f"(прогон испытаний на данных оптимизации)"
+        )
+        ctx = self._last_opt_context
+        self._worker = PboWorker(
+            data=ctx["data"],
+            strategy_cls=ctx["strategy_cls"],
+            history=self._last_opt.history,
+            n_splits=n_splits,
+            fixed_params=ctx["fixed_params"],
+            engine_kwargs=ctx["engine_kwargs"],
+            parent=self,
+        )
+        self._worker.progress.connect(self._on_pbo_progress)
+        self._worker.finished_ok.connect(self._on_pbo_done)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.stopped.connect(self._on_stopped)
+        self._worker.start()
+
+    def _on_pbo_progress(self, done: int, total: int) -> None:
+        self._set_progress(done, total, status=f"PBO: конфиг {done}/{total}")
+
+    def _on_pbo_done(self, result: PBOResult) -> None:
+        self._set_busy(False)
+        self._last_pbo = result
+        self.pbo_panel.show_result(result)
+        self.tabs.setCurrentWidget(self.pbo_panel)
+        verdict = (
+            "переподгонка" if result.pbo >= 0.5 else "отбор переносится на OOS"
+        )
+        summary = (
+            f"PBO завершён: PBO {result.pbo:.3f} — {verdict}; "
+            f"P(убыток на OOS) {result.prob_oos_loss:.2f}, "
+            f"конфигураций {result.n_trials}, S={result.n_splits}"
+        )
+        self._log(summary)
+        if result.pbo >= 0.5:
+            self._log(
+                "⚠ PBO ≥ 0.5: выбор лучших параметров по истории, вероятно, "
+                "ловит шум — на новых данных преимущество не ожидается"
             )
         self.statusBar().showMessage(summary)
 
@@ -1043,6 +1144,22 @@ class MainWindow(QMainWindow):
                     f"Deflated Sharpe: {d.dsr:.2f} — {verdict} "
                     f"(Sharpe {d.observed_sr:.3f} vs порог шума {d.expected_max_sr:.3f})"
                 )
+            if opt_result.min_trl is not None:
+                m = opt_result.min_trl
+                need = f"{m.min_length:.0f}" if math.isfinite(m.min_length) else "∞"
+                enough = "достаточно" if m.sufficient else "НЕ достаточно"
+                self._log(
+                    f"MinTRL: нужно {need} наблюдений (доверие {m.confidence:.0%}), "
+                    f"имеется {m.n_observations} — истории {enough}"
+                )
+            if opt_result.haircut is not None:
+                h = opt_result.haircut
+                self._log(
+                    f"Haircut Sharpe ({h.method}): годовой "
+                    f"{h.observed_sr_annual:.2f} → {h.adjusted_sr_annual:.2f} "
+                    f"(стрижка {h.haircut_pct:.0f}%, p {h.p_single:.3f}→"
+                    f"{h.p_adjusted:.3f} на {h.n_trials} испыт.)"
+                )
             self._apply_and_backtest(opt_result.best_params)
         else:
             self._log("Оптимизация: ни один прогон не прошёл фильтр мин. сделок")
@@ -1181,6 +1298,7 @@ class MainWindow(QMainWindow):
         lines.append(self._snapshot_wfa())
         lines.append(self._snapshot_matrix())
         lines.append(self._snapshot_mc())
+        lines.append(self._snapshot_pbo())
         return "\n".join(p for p in lines if p is not None)
 
     def _snapshot_backtest(self) -> str:
@@ -1212,6 +1330,19 @@ class MainWindow(QMainWindow):
             text += (
                 f" Deflated Sharpe={d.dsr:.2f} "
                 f"(Sharpe {d.observed_sr:.3f} vs порог шума {d.expected_max_sr:.3f})."
+            )
+        if opt.min_trl is not None:
+            m = opt.min_trl
+            need = f"{m.min_length:.0f}" if math.isfinite(m.min_length) else "∞"
+            text += (
+                f" MinTRL={need} (есть {m.n_observations}, "
+                f"{'хватает' if m.sufficient else 'не хватает'})."
+            )
+        if opt.haircut is not None:
+            h = opt.haircut
+            text += (
+                f" Haircut: годовой Sharpe {h.observed_sr_annual:.2f}→"
+                f"{h.adjusted_sr_annual:.2f} (−{h.haircut_pct:.0f}%)."
             )
         return text
 
@@ -1260,6 +1391,22 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:  # noqa: BLE001
             return f"Монте-Карло: есть результат ({exc})."
+
+    def _snapshot_pbo(self) -> str:
+        pbo = self._last_pbo
+        if pbo is None:
+            return "PBO: не выполнялось."
+        try:
+            verdict = (
+                "переподгонка" if pbo.pbo >= 0.5 else "отбор переносится на OOS"
+            )
+            return (
+                f"PBO (CSCV): {pbo.pbo:.3f} — {verdict}; "
+                f"P(убыток на OOS) {pbo.prob_oos_loss:.2f}, "
+                f"конфигураций {pbo.n_trials}, S={pbo.n_splits}."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"PBO: есть результат ({exc})."
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(f"[{datetime.now():%H:%M:%S}] {message}")

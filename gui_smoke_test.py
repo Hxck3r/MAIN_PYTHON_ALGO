@@ -68,7 +68,15 @@ def main() -> None:
     window._run_optimization()
     wait_worker(app, window)
     assert window.opt_table.rowCount() > 0, "таблица оптимизации пуста"
-    print(f"OK: оптимизация, испытаний: {window.opt_table.rowCount()}")
+    # метрики переоптимизации лучшего результата посчитаны и выведены в журнал
+    assert window._last_opt.deflated_sharpe is not None, "DSR не посчитан"
+    assert window._last_opt.min_trl is not None, "MinTRL не посчитан"
+    assert window._last_opt.haircut is not None, "Haircut Sharpe не посчитан"
+    log_text = window.log.toPlainText()
+    assert "MinTRL" in log_text and "Haircut Sharpe" in log_text, \
+        "MinTRL/Haircut не попали в журнал"
+    print(f"OK: оптимизация, испытаний: {window.opt_table.rowCount()}; "
+          f"DSR/MinTRL/Haircut в журнале")
 
     charts = window.opt_charts
     assert charts.combo_x.count() == 2, "в комбобоксах не два параметра"
@@ -154,6 +162,21 @@ def main() -> None:
     wait_worker(app, window)
     assert window.tabs.currentWidget() is mc, "вкладка Монте-Карло не активна"
     print("OK: кнопка «Монте-Карло» на панели слева")
+
+    # --- PBO (CSCV): переподгонка по последней оптимизации -------------- #
+    assert window._last_opt is not None, "нет сохранённой оптимизации для PBO"
+    pbo = window.pbo_panel
+    pbo.spin_splits.setValue(8)                 # 16 конфигов -> блоков поменьше
+    window._run_pbo_clicked()
+    wait_worker(app, window)
+    assert window.tabs.currentWidget() is pbo, "вкладка PBO не активна"
+    assert pbo.summary.rowCount() > 0, "сводка PBO пуста"
+    assert len(pbo.logit_hist.items) > 0, "гистограмма логитов пуста"
+    assert len(pbo.scatter.items) > 0, "scatter IS/OOS пуст"
+    assert window._last_pbo is not None, "результат PBO не сохранён"
+    assert 0.0 <= window._last_pbo.pbo <= 1.0, "PBO вне [0,1]"
+    print(f"OK: PBO = {window._last_pbo.pbo:.3f}, "
+          f"конфигураций {window._last_pbo.n_trials}")
 
     print("ВСЕ ПРОВЕРКИ ДЕСКТОПНОГО GUI ПРОЙДЕНЫ")
 

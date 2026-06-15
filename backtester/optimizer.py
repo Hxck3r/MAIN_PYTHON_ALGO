@@ -29,7 +29,11 @@ from .base_strategy import BaseStrategy
 from .metrics import compute_optimization_metric, metric_needs_trades
 
 if TYPE_CHECKING:  # только для аннотаций -- без циклического импорта
-    from .statistics import DeflatedSharpeResult
+    from .statistics import (
+        DeflatedSharpeResult,
+        HaircutSharpeResult,
+        MinTRLResult,
+    )
 
 Objective = Callable[[dict[str, Any]], float]
 
@@ -103,6 +107,10 @@ class OptimizationResult:
     # DSR лучшего результата с поправкой на размер перебора; заполняется
     # вызывающим кодом (deflated_sharpe_from_optimization) после оптимизации.
     deflated_sharpe: Optional["DeflatedSharpeResult"] = None
+    # MinTRL и Haircut Sharpe лучшего результата (по тем же доходностям, что и
+    # DSR) -- заполняются вызывающим кодом после оптимизации.
+    min_trl: Optional["MinTRLResult"] = None
+    haircut: Optional["HaircutSharpeResult"] = None
 
     def history_df(self) -> pd.DataFrame:
         """История всех испытаний: колонки параметров + score."""

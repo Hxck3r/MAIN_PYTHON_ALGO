@@ -133,24 +133,75 @@ class DeflatedSharpeResult:
     expected_max_sr: float     # ожидаемый максимум Sharpe чистого шума за n_trials
     n_trials: int
     n_periods: int
+    # Дисперсия Sharpe, использованная для порога шума: каноническая
+    # (разброс Sharpe по испытаниям) при заданном trial_sharpes, иначе --
+    # консервативная (дисперсия оценки Sharpe одного прогона).
+    sr_variance: float = 0.0
+    canonical: bool = False    # True -- использована дисперсия по испытаниям
 
     def __str__(self) -> str:
         verdict = (
             "значим с учётом перебора" if self.dsr >= 0.95
             else "НЕ значим: вероятен артефакт множественного тестирования"
         )
+        mode = "канонич." if self.canonical else "консерв."
         return (
             f"=== Deflated Sharpe Ratio ===\n"
             f"Sharpe за период: {self.observed_sr:.4f} "
-            f"(порог шума {self.n_trials} испытаний: {self.expected_max_sr:.4f})\n"
+            f"(порог шума {self.n_trials} испытаний [{mode}]: "
+            f"{self.expected_max_sr:.4f})\n"
             f"PSR(>0): {self.psr_zero:.3f}, DSR: {self.dsr:.3f} -- {verdict}"
         )
+
+
+def effective_number_of_trials(
+    returns_matrix: Any, corr_threshold: float = 0.95
+) -> int:
+    """Эффективное число НЕЗАВИСИМЫХ испытаний по корреляции их доходностей.
+
+    «Сырое» число точек сетки завышает штраф множественного тестирования:
+    соседние комбинации параметров дают почти одинаковые кривые эквити и не
+    являются независимыми испытаниями. Конфигурации с |корреляцией| побарных
+    доходностей >= corr_threshold объединяются в один кластер (объединение по
+    цепочке); число кластеров -- и есть эффективное число испытаний.
+
+    returns_matrix -- (T наблюдений × N конфигураций); ndarray или DataFrame
+    (например, из pbo.build_trial_returns).
+    """
+    matrix = (
+        returns_matrix.to_numpy(dtype=np.float64)
+        if isinstance(returns_matrix, pd.DataFrame)
+        else np.asarray(returns_matrix, dtype=np.float64)
+    )
+    if matrix.ndim != 2:
+        raise ValueError("returns_matrix должна быть 2D (T × N)")
+    n = matrix.shape[1]
+    if n <= 1:
+        return int(n)
+    corr = np.corrcoef(matrix, rowvar=False)
+    corr = np.nan_to_num(corr, nan=0.0)  # константные колонки -> нет корреляции
+
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if abs(corr[i, j]) >= corr_threshold:
+                parent[find(i)] = find(j)
+    return len({find(i) for i in range(n)})
 
 
 def deflated_sharpe_ratio(
     returns: np.ndarray,
     trial_scores: np.ndarray,
     n_trials: Optional[int] = None,
+    *,
+    trial_sharpes: Optional[np.ndarray] = None,
 ) -> DeflatedSharpeResult:
     """DSR лучшего результата оптимизации.
 
@@ -160,29 +211,47 @@ def deflated_sharpe_ratio(
                   (equity_curve.pct_change().dropna()).
     trial_scores: значения критерия ВСЕХ испытаний оптимизации (например,
                   колонка score из OptimizationResult.history_df()) --
-                  из них берётся дисперсия, нормированная к шкале Sharpe
-                  за период через ранговую нормализацию.
-    n_trials:     число испытаний; None -- len(trial_scores).
+                  используются лишь для счётчика испытаний, если n_trials и
+                  trial_sharpes не заданы.
+    n_trials:     число испытаний; None -- len(trial_scores) (или
+                  len(trial_sharpes), если задан). Сюда полезно передавать
+                  effective_number_of_trials(...) вместо «сырого» N.
+    trial_sharpes: Sharpe за период КАЖДОГО испытания (точечные оценки).
+                  Если заданы -- используется канонический путь Bailey &
+                  Lopez de Prado: порог шума строится на ДИСПЕРСИИ Sharpe по
+                  испытаниям V[{SR_n}]. Это корректнее консервативного пути.
 
-    Замечание: классический DSR использует дисперсию Sharpe-оценок самих
-    испытаний. Если критерий оптимизации -- не Sharpe, дисперсию по шкале
-    Sharpe честно не восстановить; здесь используется консервативный путь:
-    дисперсия оценки SR одного прогона (1/(n-1)) масштабируется на разброс
-    испытаний не меньше единичного. Для критерия sharpe_ratio результат
-    совпадает с каноническим.
+    Замечание о двух путях. Канонический DSR требует дисперсию Sharpe-оценок
+    самих испытаний (trial_sharpes). Без неё дисперсию по шкале Sharpe честно
+    не восстановить, поэтому при trial_sharpes=None используется консервативный
+    путь: дисперсия оценки SR ОДНОГО прогона (1 + SR^2/2)/(n-1). Для критерия
+    sharpe_ratio передача trial_sharpes даёт канонический результат.
     """
     returns = np.asarray(returns, dtype=np.float64)
-    scores = np.asarray(trial_scores, dtype=np.float64)
-    scores = scores[np.isfinite(scores)]
-    trials = int(n_trials) if n_trials is not None else len(scores)
-    trials = max(trials, 1)
     n = len(returns)
 
     std = returns.std(ddof=1) if n >= 2 else 0.0
     sr = float(returns.mean() / std) if std > 0 else 0.0
 
-    # Дисперсия SR-оценки одного прогона длиной n: ~ (1 + SR^2/2) / (n-1)
-    sr_var = (1.0 + 0.5 * sr * sr) / max(n - 1, 1)
+    if trial_sharpes is not None:
+        ts = np.asarray(trial_sharpes, dtype=np.float64)
+        ts = ts[np.isfinite(ts)]
+        trials = int(n_trials) if n_trials is not None else len(ts)
+        trials = max(trials, 1)
+        # Каноническая дисперсия: разброс Sharpe-оценок по испытаниям.
+        sr_var = float(np.var(ts, ddof=1)) if len(ts) >= 2 else 0.0
+        canonical = sr_var > 0.0
+        if not canonical:  # вырожденный набор -> откат на консервативный путь
+            sr_var = (1.0 + 0.5 * sr * sr) / max(n - 1, 1)
+    else:
+        scores = np.asarray(trial_scores, dtype=np.float64)
+        scores = scores[np.isfinite(scores)]
+        trials = int(n_trials) if n_trials is not None else len(scores)
+        trials = max(trials, 1)
+        # Дисперсия SR-оценки одного прогона длиной n: ~ (1 + SR^2/2) / (n-1)
+        sr_var = (1.0 + 0.5 * sr * sr) / max(n - 1, 1)
+        canonical = False
+
     sr_star = expected_max_sharpe(trials, sr_var)
 
     return DeflatedSharpeResult(
@@ -192,6 +261,8 @@ def deflated_sharpe_ratio(
         expected_max_sr=sr_star,
         n_trials=trials,
         n_periods=n,
+        sr_variance=sr_var,
+        canonical=canonical,
     )
 
 
@@ -225,6 +296,149 @@ def deflated_sharpe_from_optimization(
     # число перебранных комбинаций передаём явно через n_trials.
     return deflated_sharpe_ratio(
         returns, np.empty(0, dtype=np.float64), n_trials=max(int(n_trials), 1)
+    )
+
+
+# ---------------------------------------------------------------------- #
+# Minimum Track Record Length (MinTRL)
+# ---------------------------------------------------------------------- #
+@dataclass
+class MinTRLResult:
+    """Минимальная длина трек-рекорда для значимости Sharpe."""
+
+    min_length: float          # нужно наблюдений, чтобы PSR(benchmark) >= confidence
+    n_observations: int        # фактически наблюдений
+    sufficient: bool           # хватает ли имеющейся истории
+    observed_sr: float         # точечный Sharpe за период
+    benchmark_sr: float
+    confidence: float
+
+    def __str__(self) -> str:
+        verdict = (
+            "истории достаточно" if self.sufficient
+            else "истории НЕ достаточно для уверенного вывода"
+        )
+        need = (
+            f"{self.min_length:.0f}" if math.isfinite(self.min_length) else "бесконечно"
+        )
+        return (
+            f"=== Minimum Track Record Length ===\n"
+            f"Sharpe за период {self.observed_sr:.4f} > {self.benchmark_sr:.4f}: "
+            f"нужно {need} наблюдений при доверии {self.confidence:.2f}\n"
+            f"имеется {self.n_observations} -- {verdict}"
+        )
+
+
+def min_track_record_length(
+    returns: np.ndarray,
+    benchmark_sr: float = 0.0,
+    confidence: float = 0.95,
+) -> MinTRLResult:
+    """MinTRL: сколько наблюдений нужно, чтобы Sharpe был значим (Bailey & LdP).
+
+    Отвечает на вопрос «достаточно ли длинна история, чтобы с доверием
+    confidence утверждать, что истинный Sharpe выше benchmark_sr?». Учитывает
+    асимметрию и эксцесс доходностей (как PSR). Если имеющихся наблюдений
+    >= min_length -- трек-рекорд достаточен.
+
+    returns -- доходности ЗА ПЕРИОД; benchmark_sr -- в той же шкале за период.
+    """
+    returns = np.asarray(returns, dtype=np.float64)
+    n = len(returns)
+    std = returns.std(ddof=1) if n >= 2 else 0.0
+    sr = float(returns.mean() / std) if std > 0 else 0.0
+    if sr <= benchmark_sr:  # без преимущества длина не помогает
+        return MinTRLResult(math.inf, n, False, sr, benchmark_sr, confidence)
+
+    diff = returns - returns.mean()
+    skew = float(np.mean(diff**3) / std**3)
+    kurt = float(np.mean(diff**4) / std**4)  # обычный (не excess), у нормали 3
+    z = _norm_ppf(confidence)
+    min_len = 1.0 + (
+        1.0 - skew * sr + (kurt - 1.0) / 4.0 * sr**2
+    ) * (z / (sr - benchmark_sr)) ** 2
+    return MinTRLResult(
+        min_length=float(min_len),
+        n_observations=n,
+        sufficient=n >= min_len,
+        observed_sr=sr,
+        benchmark_sr=benchmark_sr,
+        confidence=confidence,
+    )
+
+
+# ---------------------------------------------------------------------- #
+# Haircut Sharpe Ratio (Harvey & Liu, 2015)
+# ---------------------------------------------------------------------- #
+@dataclass
+class HaircutSharpeResult:
+    """«Стрижка» Sharpe с поправкой на множественное тестирование."""
+
+    method: str                # метод поправки p-value (Bonferroni)
+    observed_sr_annual: float  # наблюдённый годовой Sharpe
+    adjusted_sr_annual: float  # после поправки на число испытаний
+    haircut_pct: float         # 1 - adj/obs, %
+    p_single: float            # односторонний p-value одиночного теста
+    p_adjusted: float          # p-value с поправкой на множественность
+    n_trials: int
+
+    def __str__(self) -> str:
+        return (
+            f"=== Haircut Sharpe Ratio ({self.method}) ===\n"
+            f"Sharpe годовой {self.observed_sr_annual:.3f} -> "
+            f"{self.adjusted_sr_annual:.3f} (стрижка {self.haircut_pct:.1f}%)\n"
+            f"p одиночный {self.p_single:.4f} -> с поправкой на "
+            f"{self.n_trials} испыт. {self.p_adjusted:.4f}"
+        )
+
+
+def haircut_sharpe_ratio(
+    returns: np.ndarray,
+    n_trials: int,
+    periods_per_year: int = 252,
+) -> HaircutSharpeResult:
+    """Haircut Sharpe по Bonferroni: насколько «срезается» Sharpe из-за перебора.
+
+    Другой методологический угол, чем DSR: вместо порога шума -- прямая
+    поправка p-value на число испытаний (Harvey & Liu, 2015). t-статистика
+    Sharpe переводится в односторонний p-value, тот умножается на n_trials
+    (Bonferroni), и из скорректированного p обратно восстанавливается
+    «остриженный» Sharpe. haircut_pct -- доля Sharpe, потерянная на поправку.
+
+    returns -- доходности ЗА ПЕРИОД; periods_per_year -- для годовой шкалы
+    в отчёте (на сам haircut не влияет).
+    """
+    returns = np.asarray(returns, dtype=np.float64)
+    n = len(returns)
+    std = returns.std(ddof=1) if n >= 2 else 0.0
+    sr = float(returns.mean() / std) if std > 0 else 0.0
+    trials = max(int(n_trials), 1)
+    ann = math.sqrt(periods_per_year)
+
+    if sr <= 0.0 or n < 2:  # нет преимущества -- стричь нечего
+        return HaircutSharpeResult(
+            "Bonferroni", sr * ann, sr * ann, 0.0, 1.0, 1.0, trials
+        )
+
+    t_stat = sr * math.sqrt(n)
+    p_single = 1.0 - _norm_cdf(t_stat)          # односторонний
+    p_adjusted = min(1.0, p_single * trials)
+    if p_adjusted >= 1.0:
+        t_adj = 0.0
+    elif p_adjusted <= 0.0:
+        t_adj = t_stat
+    else:
+        t_adj = max(_norm_ppf(1.0 - p_adjusted), 0.0)
+    sr_adj = t_adj / math.sqrt(n)
+    haircut = (1.0 - sr_adj / sr) * 100.0 if sr > 0 else 0.0
+    return HaircutSharpeResult(
+        method="Bonferroni",
+        observed_sr_annual=sr * ann,
+        adjusted_sr_annual=sr_adj * ann,
+        haircut_pct=haircut,
+        p_single=p_single,
+        p_adjusted=p_adjusted,
+        n_trials=trials,
     )
 
 

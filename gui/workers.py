@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 from typing import Any, Type
 
+import numpy as np
 import pandas as pd
 from PySide6.QtCore import QThread, Signal
 
@@ -21,14 +22,48 @@ from backtester import (
     StopRequested,
     WalkForwardConfig,
     WfaMatrixConfig,
-    deflated_sharpe_from_optimization,
+    deflated_sharpe_ratio,
+    haircut_sharpe_ratio,
     make_backtest_objective,
+    min_track_record_length,
+    pbo_from_optimization,
     run_monte_carlo,
     run_walk_forward,
     run_wfa_matrix,
 )
+from backtester.backtest_engine import run_backtest
+from backtester.metrics import _estimate_periods_per_year
 from backtester.parallel import ParallelEvaluator
 from backtester.walk_forward import grid_to_space
+
+
+def _optimization_overfit_stats(
+    data: pd.DataFrame,
+    strategy_cls: Type[BaseStrategy],
+    best_params: dict[str, Any],
+    n_trials: int,
+    fixed_params: dict[str, Any],
+    engine_kwargs: dict[str, float],
+):
+    """DSR + MinTRL + Haircut Sharpe лучшего набора по одному прогону.
+
+    Все три метрики переоптимизации считаются из доходностей ОДНОГО прогона
+    best_params, чтобы не гонять бэктест трижды. DSR совпадает с прежним
+    deflated_sharpe_from_optimization (тот же путь расчёта).
+    """
+    result = run_backtest(
+        data=data,
+        strategy_cls=strategy_cls,
+        strategy_params={**fixed_params, **best_params},
+        **engine_kwargs,
+    )
+    returns = result.equity_curve.pct_change().dropna().to_numpy(dtype=np.float64)
+    n = max(int(n_trials), 1)
+    dsr = deflated_sharpe_ratio(returns, np.empty(0, dtype=np.float64), n_trials=n)
+    mtrl = min_track_record_length(returns)
+    ppy = _estimate_periods_per_year(result.equity_curve.index)
+    hc = haircut_sharpe_ratio(returns, n_trials=n, periods_per_year=ppy)
+    return dsr, mtrl, hc
 
 
 class BacktestWorker(QThread):
@@ -156,15 +191,18 @@ class OptimizationWorker(QThread):
             if evaluator is not None:
                 evaluator.close()
 
-        # Deflated Sharpe лучшего результата (в фоне, не блокируя GUI): значим
-        # ли найденный Sharpe с поправкой на число перебранных комбинаций.
+        # Метрики переоптимизации лучшего результата (в фоне, не блокируя GUI):
+        # DSR (значим ли Sharpe с учётом перебора), MinTRL (хватает ли истории),
+        # Haircut Sharpe (сколько «срезается» поправкой на число испытаний).
         if result.best_params and math.isfinite(result.best_score):
             try:
-                result.deflated_sharpe = deflated_sharpe_from_optimization(
+                dsr, mtrl, hc = _optimization_overfit_stats(
                     self.data, self.strategy_cls, result.best_params,
-                    n_trials=len(result.history),
-                    fixed_params=self.fixed_params, engine_kwargs=self.engine_kwargs,
+                    len(result.history), self.fixed_params, self.engine_kwargs,
                 )
+                result.deflated_sharpe = dsr
+                result.min_trl = mtrl
+                result.haircut = hc
             except Exception:
                 result.deflated_sharpe = None
         self.finished_ok.emit(result)
@@ -201,6 +239,62 @@ class MonteCarloWorker(QThread):
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(mc)
+
+
+class PboWorker(QThread):
+    """PBO (вероятность переподгонки) по истории оптимизации в фоне.
+
+    Прогоняет уникальные конфигурации оптимизации (build_trial_returns) и
+    оценивает переподгонку методом CSCV. Прогресс -- по числу прогнанных
+    конфигураций; остановка -- через requestInterruption().
+    """
+
+    finished_ok = Signal(object)   # PBOResult
+    failed = Signal(str)
+    stopped = Signal()             # расчёт прерван пользователем
+    progress = Signal(int, int)    # (конфигов прогнано, всего)
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        strategy_cls: Type[BaseStrategy],
+        history: list,                  # OptimizationResult.history
+        n_splits: int,
+        fixed_params: dict[str, Any],
+        engine_kwargs: dict[str, float],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.data = data
+        self.strategy_cls = strategy_cls
+        self.history = history
+        self.n_splits = n_splits
+        self.fixed_params = fixed_params
+        self.engine_kwargs = engine_kwargs
+
+    def run(self) -> None:
+        def progress(done: int, total: int) -> None:
+            if self.isInterruptionRequested():
+                raise StopRequested()
+            self.progress.emit(done, total)
+
+        try:
+            result = pbo_from_optimization(
+                self.data,
+                self.strategy_cls,
+                self.history,
+                n_splits=self.n_splits,
+                fixed_params=self.fixed_params,
+                engine_kwargs=self.engine_kwargs,
+                progress_callback=progress,
+            )
+        except StopRequested:
+            self.stopped.emit()
+            return
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit(result)
 
 
 class WalkForwardWorker(QThread):

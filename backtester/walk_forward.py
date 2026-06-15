@@ -77,6 +77,14 @@ class WalkForwardConfig:
                       Число окон выводится из дат и смещения.
     anchored:         якорный режим -- начало IS зафиксировано на start,
                       IS-окно растёт с каждым шагом.
+    purge_days:       зазор (purge) между концом IS и началом OOS, дней.
+                      Убирает утечку на границе: сделка, открытая в конце IS,
+                      может «дожить» до OOS (её SL/TP зависит от баров OOS), а
+                      при автокорреляции смежные бары IS/OOS подсматривают друг
+                      друга. Зазор стоит брать >= макс. горизонта сделки /
+                      lookback индикатора (Lopez de Prado, purged CV). Эмбарго
+                      в прямом WFA не нужно -- IS всегда строго до OOS; оно
+                      актуально лишь для комбинаторной (k-fold/CPCV) схемы.
     """
 
     start: pd.Timestamp
@@ -85,6 +93,7 @@ class WalkForwardConfig:
     out_sample_days: int
     step_days: int = 0
     anchored: bool = False
+    purge_days: int = 0
 
     @property
     def effective_step_days(self) -> int:
@@ -93,6 +102,8 @@ class WalkForwardConfig:
     def validate(self) -> None:
         if self.in_sample_days <= 0 or self.out_sample_days <= 0:
             raise ValueError("Длины IS и OOS должны быть положительными")
+        if self.purge_days < 0:
+            raise ValueError("purge_days не может быть отрицательным")
         if self.effective_step_days < self.out_sample_days:
             raise ValueError(
                 "Смещение меньше длины OOS: OOS-участки перекрылись бы, "
@@ -107,14 +118,17 @@ def window_bounds(
 ) -> list[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp, pd.Timestamp]]:
     """Границы окон: список (is_start, is_end, oos_start, oos_end).
 
-    Все интервалы полуоткрытые [start, end), OOS начинается ровно там,
-    где кончается IS. В список попадают только окна, чей OOS целиком
-    помещается в период -- последний неполный хвост отбрасывается.
+    Все интервалы полуоткрытые [start, end). OOS начинается через зазор
+    purge_days после конца IS (при purge_days=0 -- ровно там, где кончается
+    IS, как в классическом WFA); бары зазора не входят ни в IS, ни в OOS.
+    В список попадают только окна, чей OOS целиком помещается в период --
+    последний неполный хвост отбрасывается.
     """
     config.validate()
     step = pd.Timedelta(days=config.effective_step_days)
     is_len = pd.Timedelta(days=config.in_sample_days)
     oos_len = pd.Timedelta(days=config.out_sample_days)
+    purge = pd.Timedelta(days=config.purge_days)
 
     bounds = []
     i = 0
@@ -125,10 +139,11 @@ def window_bounds(
         else:
             is_start = config.start + step * i
             is_end = is_start + is_len
-        oos_end = is_end + oos_len
+        oos_start = is_end + purge      # purge: зазор против утечки на границе
+        oos_end = oos_start + oos_len
         if oos_end > config.end:
             break
-        bounds.append((is_start, is_end, is_end, oos_end))
+        bounds.append((is_start, is_end, oos_start, oos_end))
         i += 1
     return bounds
 

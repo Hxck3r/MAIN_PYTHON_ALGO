@@ -42,6 +42,25 @@ def test_window_bounds_overlap_rejected():
         window_bounds(_config(step_days=5))
 
 
+def test_window_bounds_purge_inserts_gap():
+    """purge_days: OOS начинается через зазор после IS, бары зазора выпадают."""
+    bounds = window_bounds(_config(purge_days=5))
+    assert len(bounds) >= 1
+    for is_start, is_end, oos_start, oos_end in bounds:
+        assert (oos_start - is_end).days == 5          # зазор есть
+        assert (is_end - is_start).days == 20
+        assert (oos_end - oos_start).days == 10
+
+
+def test_window_bounds_purge_zero_matches_default():
+    assert window_bounds(_config(purge_days=0)) == window_bounds(_config())
+
+
+def test_window_bounds_purge_negative_rejected():
+    with pytest.raises(ValueError, match="purge_days"):
+        window_bounds(_config(purge_days=-1))
+
+
 def test_run_walk_forward_basic(synth_1h):
     result = run_walk_forward(
         data=synth_1h, strategy_cls=SmaCrossStrategy,
