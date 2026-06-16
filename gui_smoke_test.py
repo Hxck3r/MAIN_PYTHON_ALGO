@@ -178,6 +178,38 @@ def main() -> None:
     print(f"OK: PBO = {window._last_pbo.pbo:.3f}, "
           f"конфигураций {window._last_pbo.n_trials}")
 
+    # --- Машинное обучение: обучение модели и подстановка в стратегию ---- #
+    ml = window.ml_panel
+    if not ml.ensure_models_loaded():
+        print("ПРОПУСК: ML-зависимости не установлены — вкладка обучения недоступна")
+    else:
+        # Быстрая конфигурация: лёгкие признаки, random_forest, 3 фолда.
+        ml.combo_preset.setCurrentIndex(0)            # «Лёгкий»
+        rf = ml.combo_model.findData("random_forest")
+        if rf >= 0:
+            ml.combo_model.setCurrentIndex(rf)
+        ml.spin_splits.setValue(3)
+        window._run_ml_training(ml.make_settings())
+        wait_worker(app, window)
+        assert window._last_ml_bundle is not None, "модель не обучена"
+        assert ml.summary.rowCount() > 0, "сводка ML пуста"
+        assert len(ml.imp_plot.listDataItems()) > 0, "график важности признаков пуст"
+        assert window.tabs.currentWidget() is ml, "вкладка ML не активна"
+        assert window._ml_bundle_path, "артефакт модели не сохранён автоматически"
+        auc = window._last_ml_mr.metrics.get("cv_auc_mean", float("nan"))
+        print(f"OK: ML обучена, OOS AUC {auc:.3f}, артефакт сохранён")
+
+        # «→ В стратегию»: подставляет модель и прогоняет бэктест на OOS-сегменте
+        window._apply_ml_to_strategy()
+        wait_worker(app, window)
+        assert window.combo_strategy.currentText() == "ML модель (классификатор)", \
+            "стратегия не переключилась на ML"
+        assert window._last_result is not None, "бэктест ML-стратегии не выполнен"
+        n_trades = window._last_result.stats().total_trades
+        print(f"OK: ML-стратегия прогнана через движок, сделок: {n_trades}")
+        # снимок состояния для ИИ-ассистента содержит блок про модель
+        assert "ML-модель (" in window._ai_state_snapshot(), "нет ML в снимке для ИИ"
+
     print("ВСЕ ПРОВЕРКИ ДЕСКТОПНОГО GUI ПРОЙДЕНЫ")
 
 

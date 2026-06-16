@@ -61,6 +61,7 @@ from strategies import STRATEGIES
 
 from .chart_widget import ChartWidget
 from .mc_panel import McPanel
+from .ml_panel import MlPanel
 from .opt_charts import OptimizationChartsPanel
 from .pbo_panel import PboPanel
 from .param_table import ParamTable
@@ -69,6 +70,7 @@ from .wfa_matrix_panel import WfaMatrixPanel
 from .wfa_panel import WfaPanel
 from .workers import (
     BacktestWorker,
+    MlTrainingWorker,
     MonteCarloWorker,
     OptimizationWorker,
     PboWorker,
@@ -91,6 +93,9 @@ class MainWindow(QMainWindow):
         self._last_matrix: Optional[WfaMatrixResult] = None      # для ИИ-контекста
         self._last_mc: Optional[MonteCarloResult] = None         # для ИИ-контекста
         self._last_pbo: Optional[PBOResult] = None               # для ИИ-контекста
+        self._last_ml_mr: Optional[Any] = None       # ModelResult последнего обучения
+        self._last_ml_bundle: Optional[Any] = None   # RunBundle (модель + OOS-вероятности)
+        self._ml_bundle_path: Optional[str] = None   # путь к сохранённому артефакту
         # снимок контекста последней оптимизации (данные/стратегия/движок) --
         # нужен, чтобы PBO прогнал её конфигурации на тех же условиях, даже
         # если пользователь после оптимизации сменил период/стратегию в GUI.
@@ -423,9 +428,22 @@ class MainWindow(QMainWindow):
         self.pbo_panel.run_requested.connect(self._run_pbo)
         self.tabs.addTab(self.pbo_panel, "PBO")
 
+        self.ml_panel = MlPanel()
+        self.ml_panel.train_requested.connect(self._run_ml_training)
+        self.ml_panel.save_requested.connect(self._save_ml_clicked)
+        self.ml_panel.load_requested.connect(self._load_ml_clicked)
+        self.ml_panel.apply_requested.connect(self._apply_ml_to_strategy)
+        self.tabs.addTab(self.ml_panel, "🧠 Машинное обучение")
+        # Зависимости ML (sklearn/lightgbm) грузятся лениво при первом открытии вкладки.
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
         self.log = QPlainTextEdit(readOnly=True)
         self.tabs.addTab(self.log, "Журнал")
         return self.tabs
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is self.ml_panel:
+            self.ml_panel.ensure_models_loaded()
 
     # ================================================================== #
     # Данные
@@ -506,6 +524,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(busy)
         self.mc_panel.set_running(busy)
         self.pbo_panel.set_running(busy)
+        self.ml_panel.set_running(busy)
         self.progress.setVisible(busy)
         if busy:
             self._task_started = time.monotonic()
@@ -832,6 +851,146 @@ class MainWindow(QMainWindow):
                 "кривая, вероятно, обязана удачному порядку сделок (переподгонка)"
             )
         self.statusBar().showMessage(summary)
+
+    # ================================================================== #
+    # Машинное обучение
+    # ================================================================== #
+    def _run_ml_training(self, settings: dict[str, Any]) -> None:
+        data = self._selected_data()
+        if data is None:
+            return
+        self._set_busy(True, "Обучение модели…")
+        self._log(
+            f"Обучение ML: модель {settings.get('model_name')}, "
+            f"валидация {settings.get('validation')}, фолдов {settings.get('n_splits')}, "
+            f"цель {settings.get('target_mode')} h={settings.get('target_horizon')}, "
+            f"пресет признаков «{settings.get('preset')}»"
+        )
+        label = self.lbl_data.text().split("\n")[0]
+        self._worker = MlTrainingWorker(data, settings, source_label=label, parent=self)
+        self._worker.progress.connect(self._set_progress)
+        self._worker.status.connect(lambda t: self.statusBar().showMessage(t))
+        self._worker.finished_ok.connect(self._on_ml_done)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.stopped.connect(self._on_stopped)
+        self._worker.start()
+
+    def _on_ml_done(self, payload) -> None:
+        mr, bundle = payload
+        self._set_busy(False)
+        self._last_ml_mr = mr
+        self._last_ml_bundle = bundle
+
+        # Автосохранение артефакта в models/ — чтобы «→ В стратегию» имел путь к файлу.
+        from ml.config import MODELS_DIR
+        from ml.experiment import save_bundle
+
+        fname = f"ml_{mr.model_name}_{datetime.now():%Y%m%d_%H%M%S}.joblib"
+        try:
+            path = save_bundle(bundle, MODELS_DIR / fname)
+            self._ml_bundle_path = str(path)
+        except Exception as exc:  # noqa: BLE001
+            self._ml_bundle_path = None
+            self._log(f"Не удалось сохранить модель автоматически: {exc}")
+
+        self.ml_panel.show_result(mr)
+        self.tabs.setCurrentWidget(self.ml_panel)
+        auc = mr.metrics.get("cv_auc_mean", mr.metrics.get("roc_auc", float("nan")))
+        std = mr.metrics.get("cv_auc_std", 0.0)
+        saved = f", сохранена → {fname}" if self._ml_bundle_path else ""
+        self._log(
+            f"Модель обучена ({mr.model_name}): OOS AUC {auc:.3f}±{std:.3f}, "
+            f"порог {mr.threshold:.3f}{saved}"
+        )
+        self.statusBar().showMessage(
+            f"Модель обучена: OOS AUC {auc:.3f}±{std:.3f} — нажмите «→ В стратегию»"
+        )
+
+    def _save_ml_clicked(self) -> None:
+        if self._last_ml_bundle is None:
+            QMessageBox.information(self, "Сохранение модели", "Сначала обучите модель.")
+            return
+        from ml.config import MODELS_DIR
+        from ml.experiment import save_bundle
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить модель", str(MODELS_DIR / "model.joblib"),
+            "Артефакт модели (*.joblib)",
+        )
+        if not path:
+            return
+        try:
+            saved = save_bundle(self._last_ml_bundle, path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Сохранение модели", str(exc))
+            return
+        self._ml_bundle_path = str(saved)
+        self._log(f"Модель сохранена: {saved}")
+
+    def _load_ml_clicked(self) -> None:
+        from types import SimpleNamespace
+
+        from ml.config import MODELS_DIR
+        from ml.experiment import load_bundle
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Загрузить модель", str(MODELS_DIR), "Артефакт модели (*.joblib)",
+        )
+        if not path:
+            return
+        try:
+            bundle = load_bundle(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Загрузка модели", str(exc))
+            return
+        self._last_ml_bundle = bundle
+        self._ml_bundle_path = path
+        # Адаптер RunBundle → объект, понятный панели (она ждёт поля ModelResult).
+        # Поля oos_true/oos_fwd/importances_mda есть только у артефактов v3 — берём
+        # через getattr, чтобы старые модели тоже открывались (без части графиков).
+        import pandas as _pd
+
+        self._last_ml_mr = SimpleNamespace(
+            metrics=bundle.metrics, confusion=bundle.confusion,
+            importances=bundle.importances,
+            importances_mda=getattr(bundle, "importances_mda", {}) or {},
+            fold_metrics=bundle.fold_metrics,
+            threshold=bundle.threshold, validation=bundle.validation,
+            calibrated=bundle.calibrated, model_name=bundle.model_name,
+            y_proba=bundle.oos_proba,
+            y_true=getattr(bundle, "oos_true", _pd.Series(dtype=float)),
+            oos_fwd=getattr(bundle, "oos_fwd", _pd.Series(dtype=float)),
+        )
+        self.ml_panel.ensure_models_loaded()
+        self.ml_panel.show_result(self._last_ml_mr)
+        self.tabs.setCurrentWidget(self.ml_panel)
+        self._log(f"Модель загружена: {path}")
+
+    def _apply_ml_to_strategy(self) -> None:
+        if not self._ml_bundle_path:
+            QMessageBox.information(
+                self, "В стратегию",
+                "Сначала обучите или загрузите модель — нужен сохранённый артефакт.",
+            )
+            return
+        name = "ML модель (классификатор)"
+        idx = self.combo_strategy.findText(name)
+        if idx < 0:
+            QMessageBox.warning(
+                self, "В стратегию",
+                "Стратегия ML недоступна (нужна numba). Установите зависимость fast.",
+            )
+            return
+        self.combo_strategy.setCurrentIndex(idx)   # пересоберёт таблицу параметров MLStrategy
+        params: dict[str, Any] = {"bundle_path": self._ml_bundle_path}
+        # Порог, выбранный слайдером в ML-панели (0 → берётся порог из модели).
+        thr = self.ml_panel.selected_threshold()
+        if thr > 0.0:
+            params["prob_threshold"] = thr
+            self._log(f"Модель подставлена в стратегию (порог {thr:.3f}) — бэктест на OOS-сегменте.")
+        else:
+            self._log("Модель подставлена в стратегию — запускаю бэктест на OOS-сегменте.")
+        self._apply_and_backtest(params)
 
     # ================================================================== #
     # PBO (Probability of Backtest Overfitting, CSCV)
@@ -1299,6 +1458,7 @@ class MainWindow(QMainWindow):
         lines.append(self._snapshot_matrix())
         lines.append(self._snapshot_mc())
         lines.append(self._snapshot_pbo())
+        lines.append(self._snapshot_ml())
         return "\n".join(p for p in lines if p is not None)
 
     def _snapshot_backtest(self) -> str:
@@ -1407,6 +1567,24 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:  # noqa: BLE001
             return f"PBO: есть результат ({exc})."
+
+    def _snapshot_ml(self) -> str:
+        mr = self._last_ml_mr
+        if mr is None:
+            return "ML-модель: не обучалась."
+        try:
+            m = mr.metrics
+            auc = m.get("cv_auc_mean", m.get("roc_auc", float("nan")))
+            std = m.get("cv_auc_std", 0.0)
+            top = ", ".join(list(mr.importances)[:5]) if mr.importances else "—"
+            return (
+                f"ML-модель ({mr.model_name}, {mr.validation}): OOS AUC "
+                f"{auc:.3f}±{std:.3f}, accuracy {m.get('accuracy', float('nan')):.3f}, "
+                f"F1 {m.get('f1', float('nan')):.3f}, порог {mr.threshold:.3f}; "
+                f"топ-признаки: {top}."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"ML-модель: есть результат ({exc})."
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(f"[{datetime.now():%H:%M:%S}] {message}")

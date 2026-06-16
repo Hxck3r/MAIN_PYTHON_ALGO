@@ -21,3 +21,13 @@ except ImportError:
 else:
     STRATEGIES["SMA Crossover (быстрый, numba)"] = SmaCrossSignal
     __all__.append("SmaCrossSignal")
+
+# ML-стратегия (мост к пакету ml/). Импорт лёгкий (не тянет sklearn/lightgbm);
+# тяжёлые зависимости подтягиваются лишь при загрузке обученной модели в init().
+try:
+    from .ml_strategy import MLStrategy
+except ImportError:
+    pass
+else:
+    STRATEGIES["ML модель (классификатор)"] = MLStrategy
+    __all__.append("MLStrategy")

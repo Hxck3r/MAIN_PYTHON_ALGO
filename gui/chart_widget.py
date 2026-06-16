@@ -61,7 +61,7 @@ COLOR_SHORT = "#ff4d4d"
 COLOR_EXIT_WIN = "#9be564"
 COLOR_EXIT_LOSS = "#ff9f43"
 COLOR_LINK = "#aaaaaa"
-COLOR_EQUITY = "#4f9cf7"
+COLOR_EQUITY = "#ffffff"
 COLOR_START_CASH = "#888888"
 COLOR_GRID = "#ffffff"
 

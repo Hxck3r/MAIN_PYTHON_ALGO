@@ -9,6 +9,10 @@ venv/
 reports/
 *_quality_report.txt
 
+# ML: сохранённые модели и кеш признаков
+models/
+.cache/
+
 # Исторические данные (не храним в git)
 data/
 

@@ -432,3 +432,133 @@ class WfaMatrixWorker(QThread):
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(result)
+
+
+# --------------------------------------------------------------------------- #
+# Машинное обучение
+# --------------------------------------------------------------------------- #
+def _feature_config_from_settings(settings: dict[str, Any]):
+    """Собрать ``ml.features.FeatureConfig`` из словаря настроек панели.
+
+    Пресет управляет «богатством» признаков — для слабого ПК «Лёгкий» считает
+    минимальный набор (быстрее обучение, меньше шанс переобучения на шуме).
+    """
+    from ml.features.engineering import FeatureConfig
+
+    preset = settings.get("preset", "standard")
+    if preset == "light":
+        base = dict(
+            return_periods=[1, 3, 5], sma_windows=[10, 20], ema_windows=[12],
+            use_macd=False, use_bollinger=True, use_atr=True, use_volatility=True,
+            use_momentum=True, use_stochastic=False, use_volume=True,
+        )
+    elif preset == "extended":
+        base = dict(
+            return_periods=[1, 2, 3, 5, 10, 20], sma_windows=[10, 20, 50, 100],
+            ema_windows=[12, 26, 50], use_macd=True, use_bollinger=True,
+            use_atr=True, use_volatility=True, use_momentum=True,
+            use_stochastic=True, use_volume=True,
+        )
+    else:  # standard — дефолты FeatureConfig
+        base = {}
+
+    # Отбор признаков по умолчанию включаем на «Лёгком» пресете (слабый ПК).
+    feature_select = bool(settings.get("feature_select", preset == "light"))
+
+    return FeatureConfig(
+        target_mode=settings.get("target_mode", "direction"),
+        target_horizon=int(settings.get("target_horizon", 1)),
+        target_threshold=float(settings.get("target_threshold", 0.0)),
+        use_calendar=bool(settings.get("use_calendar", True)),
+        use_regime=bool(settings.get("use_regime", True)),
+        feature_select=feature_select,
+        **base,
+    )
+
+
+def _train_config_from_settings(settings: dict[str, Any]):
+    """Собрать ``ml.trainer.TrainConfig`` из словаря настроек панели."""
+    from ml.trainer import TrainConfig
+
+    return TrainConfig(
+        model_name=settings.get("model_name", "random_forest"),
+        validation=settings.get("validation", "walk_forward"),
+        n_splits=int(settings.get("n_splits", 5)),
+        embargo=int(settings.get("embargo", 0)),
+        balance_classes=bool(settings.get("balance_classes", True)),
+        calibrate=bool(settings.get("calibrate", False)),
+        use_sample_weights=bool(settings.get("sample_weights", True)),
+        compute_mda=bool(settings.get("compute_mda", False)),
+    )
+
+
+class MlTrainingWorker(QThread):
+    """Обучение ML-модели в фоне: признаки → purged walk-forward → артефакт.
+
+    Прогресс приходит из ``ml.trainer.train`` колбэком ``(pct, msg)``; кооперативная
+    остановка — через ``requestInterruption()`` (колбэк вернёт False → TrainingCancelled).
+    Результат — кортеж ``(ModelResult, RunBundle)`` для вкладки «Машинное обучение».
+    """
+
+    finished_ok = Signal(object)   # (ModelResult, RunBundle)
+    failed = Signal(str)
+    stopped = Signal()             # обучение прервано пользователем
+    progress = Signal(int, int)    # (процент, 100)
+    status = Signal(str)           # текстовый статус этапа
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        settings: dict[str, Any],
+        source_label: str = "",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.data = data
+        self.settings = settings
+        self.source_label = source_label
+
+    def run(self) -> None:
+        try:
+            from ml.cache import cached_feature_set
+            from ml.experiment import build_bundle
+            from ml.trainer import TrainingCancelled, train
+
+            def progress(pct: int, msg: str):
+                if self.isInterruptionRequested():
+                    return False            # ml.trainer поднимет TrainingCancelled
+                self.progress.emit(int(pct), 100)
+                self.status.emit(msg)
+                return True
+
+            self.status.emit("Расчёт признаков…")
+            fcfg = _feature_config_from_settings(self.settings)
+            # Кеш матрицы признаков: повторное обучение с теми же признаками не
+            # пересчитывает индикаторы (важно на слабом ПК).
+            fs = cached_feature_set(self.data, fcfg)
+
+            tcfg = _train_config_from_settings(self.settings)
+            # Опциональный подбор гиперпараметров на той же purged-CV.
+            if self.settings.get("tune"):
+                from dataclasses import replace
+
+                from ml.tuning import tune as tune_hp
+
+                best, _, trial_sharpes = tune_hp(
+                    fs, tcfg, int(self.settings.get("tune_trials", 15)), progress=progress
+                )
+                # Sharpe проб → дефляция (DSR) финальной модели за множественное тестирование.
+                tcfg = replace(tcfg, tune_trial_sharpes=trial_sharpes)
+                if best:
+                    tcfg = replace(tcfg, params=best)
+
+            mr = train(fs, tcfg, progress=progress)
+
+            bundle = build_bundle(mr, fs, self.data, source_path=self.source_label or None)
+        except TrainingCancelled:
+            self.stopped.emit()
+            return
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit((mr, bundle))
