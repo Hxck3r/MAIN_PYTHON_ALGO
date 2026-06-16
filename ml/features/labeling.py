@@ -110,3 +110,67 @@ def triple_barrier_labels(
     """Метки тройного барьера ({0.0, 1.0, NaN}) — тонкая обёртка над событиями."""
     events = triple_barrier_events(high, low, close, horizon, pt, sl, vol_span)
     return events["label"].rename(None)
+
+
+def meta_labels(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    side: pd.Series,
+    horizon: int,
+    pt: float = 1.5,
+    sl: float = 1.5,
+    vol_span: int = 20,
+) -> pd.DataFrame:
+    """Мета-метки (AFML гл. 3): был ли прав первичный сигнал ``side``.
+
+    Для каждого бара с заданной стороной ставятся барьеры В ПОЛЬЗУ стороны:
+    тейк = в направлении ``side``, стоп = против. Метка ``1`` — первым задет тейк
+    (сделка по первичному сигналу оказалась прибыльной), ``0`` — стоп/против. Бары без
+    стороны (``side`` = NaN/0) или с неполным окном — ``NaN`` (в обучение не идут).
+
+    Возвращает кадр с колонками ``label`` и ``t1`` (смещение до касания в барах) —
+    как :func:`triple_barrier_events`, для весов уникальности.
+    """
+    vol = ewm_volatility(close, vol_span).to_numpy()
+    c = close.to_numpy(dtype=float)
+    h = high.to_numpy(dtype=float)
+    lo = low.to_numpy(dtype=float)
+    s = side.to_numpy(dtype=float)
+    n = len(c)
+    labels = np.full(n, np.nan)
+    t1 = np.full(n, np.nan)
+
+    for i in range(n):
+        if i + horizon > n - 1:
+            break
+        si = s[i]
+        vi = vol[i]
+        if not np.isfinite(si) or si == 0 or not np.isfinite(vi) or vi <= 0:
+            continue
+        # Тейк — по направлению стороны, стоп — против неё.
+        if si > 0:
+            tp_level, sl_level = c[i] * (1.0 + pt * vi), c[i] * (1.0 - sl * vi)
+        else:
+            tp_level, sl_level = c[i] * (1.0 - pt * vi), c[i] * (1.0 + sl * vi)
+        label = None
+        touch = horizon
+        for j in range(i + 1, i + horizon + 1):
+            hit_tp = h[j] >= tp_level if si > 0 else lo[j] <= tp_level
+            hit_sl = lo[j] <= sl_level if si > 0 else h[j] >= sl_level
+            if hit_tp and hit_sl:
+                label, touch = 0.0, j - i      # оба за бар — консервативно «стоп первым»
+                break
+            if hit_tp:
+                label, touch = 1.0, j - i
+                break
+            if hit_sl:
+                label, touch = 0.0, j - i
+                break
+        if label is None:                       # лишь вертикальный — по знаку P&L стороны
+            pnl = (c[i + horizon] - c[i]) * si
+            label = 1.0 if pnl > 0 else 0.0
+        labels[i] = label
+        t1[i] = touch
+
+    return pd.DataFrame({"label": labels, "t1": t1}, index=close.index)

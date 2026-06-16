@@ -973,23 +973,33 @@ class MainWindow(QMainWindow):
                 "Сначала обучите или загрузите модель — нужен сохранённый артефакт.",
             )
             return
-        name = "ML модель (классификатор)"
+        # Мета-разметка играется отдельной стратегией (сторона из первичного сигнала).
+        is_meta = bool(self._last_ml_bundle) and \
+            (self._last_ml_bundle.feature_config or {}).get("target_mode") == "meta"
+        name = "ML мета-модель (López de Prado)" if is_meta else "ML модель (классификатор)"
         idx = self.combo_strategy.findText(name)
         if idx < 0:
             QMessageBox.warning(
-                self, "В стратегию",
-                "Стратегия ML недоступна (нужна numba). Установите зависимость fast.",
+                self, "В стратегию", f"Стратегия «{name}» недоступна.",
             )
             return
-        self.combo_strategy.setCurrentIndex(idx)   # пересоберёт таблицу параметров MLStrategy
+        self.combo_strategy.setCurrentIndex(idx)   # пересоберёт таблицу параметров стратегии
         params: dict[str, Any] = {"bundle_path": self._ml_bundle_path}
         # Порог, выбранный слайдером в ML-панели (0 → берётся порог из модели).
         thr = self.ml_panel.selected_threshold()
         if thr > 0.0:
             params["prob_threshold"] = thr
-            self._log(f"Модель подставлена в стратегию (порог {thr:.3f}) — бэктест на OOS-сегменте.")
-        else:
-            self._log("Модель подставлена в стратегию — запускаю бэктест на OOS-сегменте.")
+        # Режим сайзинга (bet sizing по уверенности).
+        size_mode = self.ml_panel.selected_size_mode()
+        if size_mode != "fixed":
+            params["size_mode"] = size_mode
+        extras = []
+        if thr > 0.0:
+            extras.append(f"порог {thr:.3f}")
+        if size_mode != "fixed":
+            extras.append("bet sizing")
+        suffix = f" ({', '.join(extras)})" if extras else ""
+        self._log(f"Модель подставлена в стратегию{suffix} — бэктест на OOS-сегменте.")
         self._apply_and_backtest(params)
 
     # ================================================================== #

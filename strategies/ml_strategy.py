@@ -69,8 +69,12 @@ class MLStrategy(BaseStrategy):
         # Защитные уровни в долях цены входа (0 → не выставлять).
         "sl_pct": 0.0,
         "tp_pct": 0.0,
-        # Доля эквити на сделку (0 → автосайзинг движка default_size_pct).
+        # Доля эквити на сделку (0 → автосайзинг движка default_size_pct). При сайзинге
+        # по уверенности — это ВЕРХНЯЯ доля (множится на размер ставки из вероятности).
         "size_pct": 0.0,
+        # Сайзинг: "fixed" — постоянная доля; "confidence"/"linear" — bet sizing из
+        # калиброванной вероятности (AFML гл. 10): больше риска на уверенных сигналах.
+        "size_mode": "fixed",
     }
 
     # ------------------------------------------------------------------ #
@@ -95,6 +99,7 @@ class MLStrategy(BaseStrategy):
         self._sl_pct = max(0.0, float(self.p["sl_pct"]))
         self._tp_pct = max(0.0, float(self.p["tp_pct"]))
         self._size_pct = max(0.0, float(self.p["size_pct"]))
+        self._size_mode = str(self.p.get("size_mode", "fixed")).strip() or "fixed"
 
         # Выравниваем OOS-вероятности по барам данных. Бары без предсказания → NaN
         # (модель их не оценивала) → на них не торгуем. Это и есть граница in/out-of-sample.
@@ -137,12 +142,25 @@ class MLStrategy(BaseStrategy):
                     self.close_position(tag="ml_exit")
 
     # ------------------------------------------------------------------ #
+    def _size_fraction(self, bar: Bar) -> float:
+        """Доля эквити на сделку: фикс или bet sizing из вероятности (AFML гл. 10)."""
+        if self._size_mode in ("confidence", "linear"):
+            from ml.bet_sizing import bet_size_from_proba
+
+            p = self._proba[bar.index]
+            if math.isnan(p):
+                return 0.0
+            cap = self._size_pct if self._size_pct > 0.0 else 0.95
+            return cap * bet_size_from_proba(float(p), self._size_mode)
+        return self._size_pct                       # fixed (0 → автосайзинг движка)
+
     def _enter(self, side: int, bar: Bar) -> None:
         """Открыть позицию заданного направления с опциональными SL/TP и размером."""
         price = bar.close
         kw: dict[str, Any] = {}
-        if self._size_pct > 0.0:
-            kw["size"] = self.equity * self._size_pct / price
+        frac = self._size_fraction(bar)
+        if frac > 0.0:
+            kw["size"] = self.equity * frac / price
         if side == 1:
             if self._sl_pct > 0.0:
                 kw["stop_loss"] = price * (1.0 - self._sl_pct)

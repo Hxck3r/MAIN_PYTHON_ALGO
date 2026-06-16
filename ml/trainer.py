@@ -176,6 +176,13 @@ def _sample_weights(fs: FeatureSet, cfg: TrainConfig) -> np.ndarray | None:
     return w
 
 
+def _oos_side(fs: FeatureSet, index: pd.Index) -> pd.Series | None:
+    """Сторона первичного сигнала на OOS-барах (мета-разметка) или None."""
+    if not fs.side_column or fs.side_column not in fs.frame.columns:
+        return None
+    return fs.frame[fs.side_column].reindex(index).rename("oos_side")
+
+
 def _signal_returns(fwd1: pd.Series, index: pd.Index, proba, thr: float) -> pd.Series:
     """OOS-доходность простого «лонг/флэт» сигнала: позиция × доходность следующего бара."""
     pos = (np.asarray(proba, dtype=float) >= thr).astype(float)
@@ -288,6 +295,7 @@ def _assemble(
     oos_returns: pd.Series | None = None,
     importances_mda: dict[str, float] | None = None,
     oos_fwd: pd.Series | None = None,
+    oos_side: pd.Series | None = None,
 ) -> ModelResult:
     """Собрать ModelResult из сшитых out-of-sample предсказаний."""
     y_pred = (y_proba >= threshold).astype(int)
@@ -320,6 +328,7 @@ def _assemble(
         importances_mda=importances_mda or {},
         oos_returns=oos_returns if oos_returns is not None else pd.Series(dtype=float),
         oos_fwd=oos_fwd if oos_fwd is not None else pd.Series(dtype=float),
+        oos_side=oos_side if oos_side is not None else pd.Series(dtype=float),
     )
 
 
@@ -365,6 +374,7 @@ def _train_holdout(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) -> Mo
         extra={"train_size": float(len(X_train)), "test_size": float(len(X_test)),
                "oos_sharpe": _sharpe(oos_returns)},
         oos_returns=oos_returns, importances_mda=mda, oos_fwd=oos_fwd,
+        oos_side=_oos_side(fs, X_test.index),
     )
 
 
@@ -436,7 +446,8 @@ def _train_walk_forward(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) 
     }
     _emit(progress, 100, "Готово.")
     return _assemble(cfg, fs, final_model, y_all, proba_all, thr, fold_metrics, extra,
-                     oos_returns=oos_returns, importances_mda=mda, oos_fwd=oos_fwd)
+                     oos_returns=oos_returns, importances_mda=mda, oos_fwd=oos_fwd,
+                     oos_side=_oos_side(fs, proba_all.index))
 
 
 def _attach_significance(mr: ModelResult, fs: FeatureSet) -> None:

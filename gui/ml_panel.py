@@ -53,8 +53,10 @@ CHANCE = "#888888"
 
 PRESETS = [("Лёгкий (быстро)", "light"), ("Стандарт", "standard"),
            ("Расширенный", "extended")]
-TARGETS = [("Направление цены", "direction"), ("Тройной барьер", "triple_barrier")]
+TARGETS = [("Направление цены", "direction"), ("Тройной барьер", "triple_barrier"),
+           ("Мета-разметка (López de Prado)", "meta")]
 VALIDATIONS = [("Walk-forward (честно)", "walk_forward"), ("Holdout (быстро)", "holdout")]
+PRIMARIES = [("MA-кросс (тренд)", "ma_cross"), ("Моментум", "momentum")]
 
 
 def _as_1d_array(series) -> Optional[np.ndarray]:
@@ -258,8 +260,22 @@ class MlPanel(QWidget):
         self.chk_regime = QCheckBox("Режимные (волатильность/тренд)")
         self.chk_regime.setChecked(True)
         self.chk_regime.setToolTip("Режим волатильности и долгий моментум — контекст рынка.")
+        self.chk_fracdiff = QCheckBox("Фрак-диф (стационарность + память)")
+        self.chk_fracdiff.setToolTip(
+            "Фракционное дифференцирование лог-цены (López de Prado, гл. 5): признак "
+            "стационарен (как доходность), но сохраняет память ряда. Часто сильнее "
+            "обычных доходностей."
+        )
+        self.spin_fracdiff_d = QDoubleSpinBox(minimum=0.05, maximum=1.0, value=0.40)
+        self.spin_fracdiff_d.setSingleStep(0.05)
+        self.spin_fracdiff_d.setDecimals(2)
+        self.spin_fracdiff_d.setEnabled(False)
+        self.spin_fracdiff_d.setToolTip("Порядок d: меньше — больше памяти, больше — стационарнее.")
+        self.chk_fracdiff.toggled.connect(self.spin_fracdiff_d.setEnabled)
         feat_form.addRow(self.chk_calendar)
         feat_form.addRow(self.chk_regime)
+        feat_form.addRow(self.chk_fracdiff)
+        feat_form.addRow("Порядок d:", self.spin_fracdiff_d)
 
         target_box = QGroupBox("Цель (что предсказываем)")
         target_form = QFormLayout(target_box)
@@ -284,6 +300,26 @@ class MlPanel(QWidget):
         target_form.addRow("Тип:", self.combo_target)
         target_form.addRow("Горизонт (баров):", self.spin_horizon)
         target_form.addRow("Порог роста:", self.spin_threshold)
+
+        # Первичный сигнал — только для мета-разметки (сторона сделки).
+        self.primary_box = QGroupBox("Первичный сигнал (для меты)")
+        primary_form = QFormLayout(self.primary_box)
+        self.combo_primary = QComboBox()
+        for label, key in PRIMARIES:
+            self.combo_primary.addItem(label, key)
+        self.combo_primary.setToolTip(
+            "Правило, задающее СТОРОНУ сделки (long/short). Мета-модель учится решать, "
+            "брать ли сигнал. AFML гл. 3."
+        )
+        self.spin_prim_fast = QSpinBox(minimum=2, maximum=200, value=20)
+        self.spin_prim_slow = QSpinBox(minimum=3, maximum=500, value=50)
+        self.spin_prim_fast.setToolTip("Быстрое окно (MA-кросс) / окно моментума.")
+        self.spin_prim_slow.setToolTip("Медленное окно MA-кросс (для моментума не используется).")
+        primary_form.addRow("Правило:", self.combo_primary)
+        primary_form.addRow("Быстрое окно:", self.spin_prim_fast)
+        primary_form.addRow("Медленное окно:", self.spin_prim_slow)
+        self.primary_box.setVisible(False)
+        self.combo_target.currentIndexChanged.connect(self._on_target_changed)
 
         model_box = QGroupBox("Модель и валидация")
         model_form = QFormLayout(model_box)
@@ -323,6 +359,12 @@ class MlPanel(QWidget):
             "Важность перестановкой на OOS (López de Prado, гл. 8): честнее импьюрити-"
             "важности, но требует доп. прогонов. Включайте при достатке времени."
         )
+        self.chk_betsize = QCheckBox("Сайзинг по уверенности (bet sizing)")
+        self.chk_betsize.setToolTip(
+            "Размер позиции пропорционален уверенности модели (AFML гл. 10): больше "
+            "риска на уверенных сигналах. Применяется при «→ В стратегию». Для "
+            "мета-разметки рекомендуется."
+        )
         self.chk_tune = QCheckBox("Подбор гиперпараметров")
         self.chk_tune.setToolTip(
             "Случайный поиск лучших гиперпараметров на той же purged walk-forward CV. "
@@ -340,6 +382,7 @@ class MlPanel(QWidget):
         model_form.addRow(self.chk_weights)
         model_form.addRow(self.chk_select)
         model_form.addRow(self.chk_mda)
+        model_form.addRow(self.chk_betsize)
         model_form.addRow(self.chk_tune)
         model_form.addRow("Проб подбора:", self.spin_tune_trials)
 
@@ -366,7 +409,7 @@ class MlPanel(QWidget):
         left_widget = QWidget()
         left_col = QVBoxLayout(left_widget)
         left_col.setContentsMargins(0, 0, 0, 0)
-        for w in (feat_box, target_box, model_box, self.btn_train):
+        for w in (feat_box, target_box, self.primary_box, model_box, self.btn_train):
             left_col.addWidget(w)
         left_col.addLayout(btn_row)
         left_col.addWidget(self.lbl_verdict)
@@ -422,6 +465,8 @@ class MlPanel(QWidget):
         self.hist_plot, self.equity_plot = self._add_chart_page("Вероятности · Эквити",
                                                                "Распределение P(рост) по классам",
                                                                "OOS-эквити сигнала (лонг/флэт)")
+        # Страница 4: кривая размера ставки (bet sizing) от вероятности.
+        self.size_plot = self._add_single_chart_page("Сайзинг", "Размер ставки от вероятности")
 
     def _add_chart_page(self, tab_title: str, title_top: str, title_bottom: str):
         """Создать вкладку с двумя графиками (верх/низ) и вернуть (top_plot, bottom_plot)."""
@@ -436,6 +481,17 @@ class MlPanel(QWidget):
             plot.addItem(make_grid_item())
         self.chart_tabs.addTab(glw, tab_title)
         return top, bottom
+
+    def _add_single_chart_page(self, tab_title: str, title: str):
+        """Создать вкладку с одним графиком и вернуть его."""
+        glw = pg.GraphicsLayoutWidget()
+        glw.setBackground(BG)
+        plot = glw.addPlot(row=0, col=0)
+        plot.setTitle(title)
+        plot.setMenuEnabled(False)
+        plot.addItem(make_grid_item())
+        self.chart_tabs.addTab(glw, tab_title)
+        return plot
 
     # ------------------------------------------------------------------ #
     def ensure_models_loaded(self) -> bool:
@@ -466,6 +522,18 @@ class MlPanel(QWidget):
                 self.combo_model.setCurrentIndex(self.combo_model.count() - 1)
         return True
 
+    def _on_target_changed(self) -> None:
+        """Показать настройки первичного сигнала только для мета-разметки."""
+        is_meta = self.combo_target.currentData() == "meta"
+        self.primary_box.setVisible(is_meta)
+        # Для меты сайзинг по уверенности логичен — предлагаем по умолчанию.
+        if is_meta and not self.chk_betsize.isChecked():
+            self.chk_betsize.setChecked(True)
+
+    def selected_size_mode(self) -> str:
+        """Режим сайзинга для стратегии: confidence (bet sizing) или fixed."""
+        return "confidence" if self.chk_betsize.isChecked() else "fixed"
+
     def make_settings(self) -> dict:
         return {
             "preset": self.combo_preset.currentData(),
@@ -474,6 +542,11 @@ class MlPanel(QWidget):
             "target_threshold": self.spin_threshold.value() / 100.0,
             "use_calendar": self.chk_calendar.isChecked(),
             "use_regime": self.chk_regime.isChecked(),
+            "use_fracdiff": self.chk_fracdiff.isChecked(),
+            "fracdiff_d": self.spin_fracdiff_d.value(),
+            "primary_kind": self.combo_primary.currentData(),
+            "primary_fast": self.spin_prim_fast.value(),
+            "primary_slow": self.spin_prim_slow.value(),
             "model_name": self.combo_model.currentData() or "random_forest",
             "validation": self.combo_validation.currentData(),
             "n_splits": self.spin_splits.value(),
@@ -522,7 +595,7 @@ class MlPanel(QWidget):
             self._yt = None                      # рассинхрон (старый адаптер) — без меток
 
         for plot in (self.imp_plot, self.fold_plot, self.calib_plot,
-                     self.roc_plot, self.hist_plot, self.equity_plot):
+                     self.roc_plot, self.hist_plot, self.equity_plot, self.size_plot):
             plot.clear()
             plot.addItem(make_grid_item())
         self._roc_marker = None
@@ -532,6 +605,7 @@ class MlPanel(QWidget):
         self._draw_calibration()
         self._draw_roc()
         self._draw_prob_hist()
+        self._draw_betsize(mr)
 
         # Инициализировать слайдер порогом модели и пересчитать зависимые графики.
         have_interactive = self._yt is not None and self._yp is not None
@@ -667,6 +741,32 @@ class MlPanel(QWidget):
         equity = np.cumsum(pos * fwd)
         self.equity_plot.addItem(pg.PlotCurveItem(
             x=np.arange(equity.size), y=equity, pen=pg.mkPen(COLOR_GOOD, width=2)))
+
+    def _draw_betsize(self, mr) -> None:
+        """Кривая размера ставки от вероятности (AFML гл. 10) + где «садятся» OOS-сигналы."""
+        self.size_plot.setLabel("bottom", "P(класс 1)")
+        self.size_plot.setLabel("left", "размер ставки (доля)")
+        try:
+            from ml.bet_sizing import bet_size_curve
+        except Exception:  # noqa: BLE001
+            return
+        for method, color, name in (("confidence", "#4f9cf7", "уверенность"),
+                                    ("linear", CHANCE, "линейный")):
+            ps, sizes = bet_size_curve(method)
+            pen = pg.mkPen(color, width=2) if method == "confidence" else \
+                pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine)
+            self.size_plot.addItem(pg.PlotCurveItem(x=ps, y=sizes, pen=pen, name=name))
+        # Где концентрируются вероятности OOS — туда и приходится сайзинг.
+        if self._yp is not None:
+            hist, edges = np.histogram(self._yp, bins=20, range=(0.0, 1.0), density=True)
+            scale = 0.9 / hist.max() if hist.max() > 0 else 0.0
+            self.size_plot.addItem(pg.PlotCurveItem(
+                x=edges, y=hist * scale, stepMode=True, fillLevel=0.0,
+                brush=pg.mkBrush(79, 156, 247, 60), pen=pg.mkPen(None)))
+        thr = float(getattr(mr, "threshold", 0.5))
+        self.size_plot.addItem(pg.InfiniteLine(
+            thr, angle=90, pen=pg.mkPen(COLOR_WARN, style=QtCore.Qt.PenStyle.DashLine),
+            label=f"порог {thr:.2f}", labelOpts={"color": COLOR_WARN, "position": 0.9}))
 
     def _on_threshold_changed(self) -> None:
         """Пересчитать метрики/маркер/эквити под текущий порог — без переобучения."""

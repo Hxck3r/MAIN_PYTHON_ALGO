@@ -31,3 +31,9 @@ except ImportError:
 else:
     STRATEGIES["ML модель (классификатор)"] = MLStrategy
     __all__.append("MLStrategy")
+
+    # Мета-лейблинг (López de Prado): первичный сигнал × фильтр мета-модели.
+    from .meta_strategy import MetaLabelStrategy
+
+    STRATEGIES["ML мета-модель (López de Prado)"] = MetaLabelStrategy
+    __all__.append("MetaLabelStrategy")

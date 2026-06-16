@@ -83,3 +83,64 @@ def test_monte_carlo_on_ml_strategy(bundle_path):
     mc = run_monte_carlo(result, MonteCarloConfig(n_sims=200, method="resample"))
     assert mc.n_trades == result.stats().total_trades
     assert len(mc.total_return_pct) == 200
+
+
+# --- Мета-лейблинг + bet sizing -------------------------------------------- #
+@pytest.fixture(scope="module")
+def meta_bundle_path(tmp_path_factory):
+    """Обучить мета-модель (первичный сигнал + фильтр) и сохранить артефакт."""
+    df = generate_synthetic_data(n_bars=1500, freq="1h", seed=7)
+    fs = build_feature_set(df, FeatureConfig(
+        target_mode="meta", target_horizon=10,
+        primary_kind="ma_cross", primary_fast=15, primary_slow=40))
+    mr = train(fs, TrainConfig(model_name="random_forest", validation="walk_forward"))
+    bundle = build_bundle(mr, fs, df, source_path="synthetic.csv")
+    path = save_bundle(bundle, tmp_path_factory.mktemp("models") / "meta.joblib")
+    return df, path, bundle
+
+
+def test_meta_strategy_registered():
+    from strategies.meta_strategy import MetaLabelStrategy
+
+    assert "ML мета-модель (López de Prado)" in STRATEGIES
+    assert STRATEGIES["ML мета-модель (López de Prado)"] is MetaLabelStrategy
+
+
+def test_meta_strategy_runs_and_is_causal(meta_bundle_path):
+    """Мета-стратегия проигрывает сторону×фильтр и не торгует до первого OOS-бара."""
+    from strategies.meta_strategy import MetaLabelStrategy
+
+    df, path, bundle = meta_bundle_path
+    aligned = bundle.oos_proba.reindex(df.index).to_numpy(dtype=float)
+    first_oos = int(np.argmax(~np.isnan(aligned)))
+
+    result = run_backtest(
+        df, MetaLabelStrategy,
+        {"bundle_path": str(path), "size_mode": "confidence"},
+        prefer_fast=False,
+    )
+    assert len(result.equity_curve) == len(df)
+    assert np.isfinite(result.final_equity)
+    for tr in result.trades:
+        assert tr.entry_bar >= first_oos
+
+
+def test_bet_sizing_changes_position_sizes(bundle_path):
+    """Сайзинг по уверенности даёт иной размер позиций, чем фиксированный."""
+    df, path, _ = bundle_path
+    conf = run_backtest(
+        df, MLStrategy,
+        {"bundle_path": str(path), "size_mode": "confidence", "size_pct": 0.9},
+        prefer_fast=False,
+    )
+    fixed = run_backtest(
+        df, MLStrategy,
+        {"bundle_path": str(path), "size_mode": "fixed", "size_pct": 0.9},
+        prefer_fast=False,
+    )
+    if conf.stats().total_trades < 3:
+        pytest.skip("Мало сделок для сравнения сайзинга")
+    # Размеры позиций отличаются (bet sizing масштабирует по вероятности).
+    conf_sizes = [round(t.size, 6) for t in conf.trades]
+    fixed_sizes = [round(t.size, 6) for t in fixed.trades]
+    assert conf_sizes != fixed_sizes

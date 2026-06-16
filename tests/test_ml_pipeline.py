@@ -265,3 +265,56 @@ def test_float32_and_feature_selection(ohlcv):
     # или осталось, но обучение всё равно проходит)
     mr = train(fs, TrainConfig(model_name="random_forest", n_splits=3))
     assert 0.0 <= mr.metrics["accuracy"] <= 1.0
+
+
+# --- Фракционное дифференцирование (AFML гл. 5) ---------------------------- #
+def test_fracdiff_weights_and_transform(ohlcv):
+    import numpy as np
+
+    from ml.features.fracdiff import ffd_weights, frac_diff_ffd
+
+    w = ffd_weights(0.4, threshold=1e-3)
+    assert w[-1] == 1.0                                # самый новый коэффициент = 1
+    assert len(w) > 5 and abs(w).min() >= 1e-3 * 0.99  # обрезка по порогу
+
+    fd = frac_diff_ffd(np.log(ohlcv["close"]), 0.4, threshold=1e-3)
+    width = len(w)
+    assert fd.iloc[:width - 1].isna().all()            # разогрев — NaN
+    assert fd.iloc[width - 1:].notna().all()
+    # d=0 возвращает исходный ряд (память не тронута)
+    same = frac_diff_ffd(ohlcv["close"], 0.0)
+    assert np.allclose(same.to_numpy(), ohlcv["close"].to_numpy())
+
+
+def test_fracdiff_feature_added(ohlcv):
+    fs = build_feature_set(ohlcv, FeatureConfig(use_fracdiff=True))
+    assert "fracdiff" in fs.feature_columns
+
+
+# --- Bet sizing (AFML гл. 10) ---------------------------------------------- #
+def test_bet_size_monotone_and_bounded():
+    from ml.bet_sizing import bet_size_from_proba
+
+    assert bet_size_from_proba(0.5) == 0.0
+    sizes = [bet_size_from_proba(p) for p in (0.5, 0.6, 0.7, 0.8, 0.9)]
+    assert all(0.0 <= s <= 1.0 for s in sizes)
+    assert sizes == sorted(sizes)                      # растёт с уверенностью
+    # симметрия относительно ½
+    assert abs(bet_size_from_proba(0.8) - bet_size_from_proba(0.2)) < 1e-9
+
+
+# --- Мета-разметка (AFML гл. 3) -------------------------------------------- #
+def test_meta_labeling_pipeline(ohlcv):
+    import numpy as np
+
+    cfg = FeatureConfig(target_mode="meta", target_horizon=10,
+                        primary_kind="ma_cross", primary_fast=15, primary_slow=40)
+    fs = build_feature_set(ohlcv, cfg)
+    assert fs.side_column == "prim_side"
+    assert "prim_side" in fs.feature_columns
+    assert set(fs.frame[fs.target_column].unique()) <= {0, 1}
+
+    mr = train(fs, TrainConfig(model_name="random_forest", n_splits=4))
+    finite = mr.oos_side[np.isfinite(mr.oos_side)]
+    assert len(mr.oos_side) == len(mr.test_index) > 0
+    assert set(np.unique(finite)) <= {-1.0, 1.0}        # сторона ∈ {-1,+1}

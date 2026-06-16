@@ -56,14 +56,25 @@ class FeatureConfig:
     # Хранить матрицу признаков в float32 (вдвое меньше памяти, быстрее деревья).
     use_float32: bool = True
 
+    # Фрак-диф признак: стационарный, но с памятью (López de Prado, гл. 5).
+    use_fracdiff: bool = False
+    fracdiff_d: float = 0.4
+    # Порог обрезки весов: 1e-3 даёт окно ~55 баров при d=0.4 (умеренный разогрев,
+    # дёшево на слабом ПК); меньше — длиннее память, но больше потери на разогреве.
+    fracdiff_threshold: float = 1e-3
+
     # Целевая переменная.
-    target_mode: str = "direction"       # "direction" | "triple_barrier"
+    target_mode: str = "direction"       # "direction" | "triple_barrier" | "meta"
     target_horizon: int = config.DEFAULT_FORWARD_HORIZON
     target_threshold: float = config.DEFAULT_RETURN_THRESHOLD
     # Параметры тройного барьера (множители волатильности).
     tb_pt: float = 1.5
     tb_sl: float = 1.5
     tb_vol_span: int = 20
+    # Первичный сигнал для мета-разметки (target_mode="meta", AFML гл. 3).
+    primary_kind: str = "ma_cross"       # "ma_cross" | "momentum"
+    primary_fast: int = 20
+    primary_slow: int = 50
 
     TARGET_COL: str = "target"
 
@@ -103,6 +114,7 @@ def build_feature_set(df: pd.DataFrame, cfg: FeatureConfig) -> FeatureSet:
     overlay_cols: list[str] = []
     rsi_col: str | None = None
     macd_cols: tuple[str, str] | None = None
+    side_col: str | None = None
 
     # --- Доходности за разные лаги (стационарные признаки) ---------------
     for p in cfg.return_periods:
@@ -173,6 +185,14 @@ def build_feature_set(df: pd.DataFrame, cfg: FeatureConfig) -> FeatureSet:
         out["stoch_k"] = ind.stochastic_k(high, low, close)
         feature_cols.append("stoch_k")
 
+    # --- Фрак-диф лог-цены (стационарность + память) --------------------
+    if cfg.use_fracdiff:
+        from ml.features.fracdiff import frac_diff_ffd
+
+        log_close = np.log(close.clip(lower=1e-12))
+        out["fracdiff"] = frac_diff_ffd(log_close, cfg.fracdiff_d, cfg.fracdiff_threshold)
+        feature_cols.append("fracdiff")
+
     # --- Объём ----------------------------------------------------------
     if cfg.use_volume and (volume.abs().sum() > 0):
         out["vol_change"] = volume.pct_change().replace([np.inf, -np.inf], np.nan)
@@ -207,7 +227,20 @@ def build_feature_set(df: pd.DataFrame, cfg: FeatureConfig) -> FeatureSet:
     # для тройного барьера = бар касания, для направления = горизонт.
     T1_COL = "_t1_off"
     h = max(1, cfg.target_horizon)
-    if cfg.target_mode == "triple_barrier":
+    if cfg.target_mode == "meta":
+        from ml.features.primary import primary_signal
+
+        side = primary_signal(close, cfg.primary_kind, cfg.primary_fast, cfg.primary_slow)
+        out["prim_side"] = side.to_numpy()
+        feature_cols.append("prim_side")          # сторона — признак мета-модели
+        side_col = "prim_side"
+        events = lab.meta_labels(
+            high, low, close, side, h, cfg.tb_pt, cfg.tb_sl, cfg.tb_vol_span
+        )
+        out[cfg.TARGET_COL] = events["label"].to_numpy()
+        out[T1_COL] = events["t1"].to_numpy()
+        log.info("Таргет: мета-разметка (первичный=%s, h=%d)", cfg.primary_kind, h)
+    elif cfg.target_mode == "triple_barrier":
         events = lab.triple_barrier_events(
             high, low, close, h, cfg.tb_pt, cfg.tb_sl, cfg.tb_vol_span
         )
@@ -262,4 +295,5 @@ def build_feature_set(df: pd.DataFrame, cfg: FeatureConfig) -> FeatureSet:
         macd_columns=macd_cols,
         config_meta=asdict(cfg),
         event_end=event_end,
+        side_column=side_col,
     )

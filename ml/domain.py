@@ -30,6 +30,9 @@ class FeatureSet:
     # Позиционный индекс последнего бара, который покрывает метка строки (длина «жизни»
     # метки) — для весов уникальности выборки (AFML гл. 4). None → веса недоступны.
     event_end: Optional[np.ndarray] = None
+    # Имя столбца со стороной первичного сигнала {-1,+1} при мета-разметке (AFML гл. 3);
+    # None для обычных режимов. Нужен, чтобы перенести сторону в OOS-результат/стратегию.
+    side_column: Optional[str] = None
 
 
 @dataclass
@@ -62,3 +65,6 @@ class ModelResult:
     # «Сырая» доходность следующего бара на каждом OOS-баре — чтобы интерактивно
     # пересчитывать pnl/Sharpe при сдвиге порога без переобучения.
     oos_fwd: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    # Сторона первичного сигнала {-1,+1} на OOS-барах (мета-разметка) — её «проигрывает»
+    # MetaLabelStrategy; пусто для обычных режимов.
+    oos_side: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))

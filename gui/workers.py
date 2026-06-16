@@ -472,6 +472,11 @@ def _feature_config_from_settings(settings: dict[str, Any]):
         use_calendar=bool(settings.get("use_calendar", True)),
         use_regime=bool(settings.get("use_regime", True)),
         feature_select=feature_select,
+        use_fracdiff=bool(settings.get("use_fracdiff", False)),
+        fracdiff_d=float(settings.get("fracdiff_d", 0.4)),
+        primary_kind=settings.get("primary_kind", "ma_cross"),
+        primary_fast=int(settings.get("primary_fast", 20)),
+        primary_slow=int(settings.get("primary_slow", 50)),
         **base,
     )
 

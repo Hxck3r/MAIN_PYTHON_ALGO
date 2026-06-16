@@ -63,6 +63,8 @@ class RunBundle:
     # визуализации (калибровка/ROC/гистограмма/эквити) после загрузки артефакта.
     oos_true: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     oos_fwd: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    # Сторона первичного сигнала на OOS-барах (мета-разметка) — её играет MetaLabelStrategy.
+    oos_side: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     fold_metrics: list[dict] = field(default_factory=list)
     importances: dict[str, float] = field(default_factory=dict)
     importances_mda: dict[str, float] = field(default_factory=dict)
@@ -76,7 +78,7 @@ class RunBundle:
     def summary(self) -> dict[str, Any]:
         """Метаданные без модели и без рядов по барам — для JSON-сводки."""
         d = asdict(self)
-        for heavy in ("model", "oos_proba", "oos_true", "oos_fwd"):
+        for heavy in ("model", "oos_proba", "oos_true", "oos_fwd", "oos_side"):
             d.pop(heavy, None)
         return d
 
@@ -100,6 +102,8 @@ def build_bundle(
         oos_true=pd.Series(mr.y_true.values, index=mr.y_true.index, name="oos_true"),
         oos_fwd=pd.Series(mr.oos_fwd.values, index=mr.oos_fwd.index, name="oos_fwd")
         if len(mr.oos_fwd) else pd.Series(dtype=float),
+        oos_side=pd.Series(mr.oos_side.values, index=mr.oos_side.index, name="oos_side")
+        if len(mr.oos_side) else pd.Series(dtype=float),
         fold_metrics=list(mr.fold_metrics),
         importances=dict(mr.importances),
         importances_mda=dict(mr.importances_mda),
