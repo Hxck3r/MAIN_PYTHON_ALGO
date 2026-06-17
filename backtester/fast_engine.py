@@ -235,7 +235,7 @@ def _run_kernel(
     for j in range(n):
         o = open_[j]
         h = high[j]
-        l = low[j]
+        l = low[j]  # noqa: E741 — OHLC-конвенция o/h/l/c в numba-ядре
         c = close[j]
 
         # --- 1) исполнение отложенного рыночного ордера на открытии бара --- #

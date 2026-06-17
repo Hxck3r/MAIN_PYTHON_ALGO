@@ -40,8 +40,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from itertools import product
-from typing import Any, Callable, Optional, Type
+from typing import Any, Optional, Type
 
 import numpy as np
 import pandas as pd

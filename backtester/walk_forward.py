@@ -27,6 +27,7 @@ Walk-Forward Analysis (WFA): скользящие окна оптимизаци�
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional, Type
 
@@ -706,6 +707,17 @@ def run_walk_forward(
         raise ValueError(
             "Не помещается ни одно окно: уменьшите длины IS/OOS "
             "или расширьте период"
+        )
+    if config.purge_days == 0:
+        # warnings (а не logging) — фильтр по умолчанию де-дублирует по месту вызова,
+        # поэтому матричный WFO с десятками ячеек не зальёт лог повторами.
+        warnings.warn(
+            "WFA без purge (purge_days=0): сделка с последнего IS-бара может "
+            "закрыться уже на OOS, а смежные бары IS/OOS из-за автокорреляции "
+            "подсматривают друг друга — оценка OOS оптимистична. Задайте "
+            "purge_days >= макс. горизонта сделки / lookback индикатора "
+            "(Lopez de Prado, purged CV).",
+            stacklevel=2,
         )
 
     fixed = dict(fixed_params or {})

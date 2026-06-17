@@ -16,7 +16,6 @@ import math
 from typing import Optional
 
 import numpy as np
-import pandas as pd
 import pyqtgraph as pg
 from pyqtgraph import QtCore
 from PySide6.QtCore import Qt, Signal
@@ -224,8 +223,6 @@ class WfaMatrixPanel(QWidget):
         # маркер рекомендованной ячейки (центр плато)
         robust = self._result.robust_cell()
         if robust is not None:
-            xs = list(x_centers)
-            ys = list(y_centers)
             if robust.oos_days in mat.columns and robust.is_days in mat.index:
                 ix = list(mat.columns).index(robust.oos_days)
                 iy = list(mat.index).index(robust.is_days)

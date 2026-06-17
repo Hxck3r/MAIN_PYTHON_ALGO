@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -117,7 +117,7 @@ class WfaSummaryTable(QTableWidget):
             dsr_color = COLOR_GOOD if result.oos_dsr.dsr >= 0.95 else COLOR_WARN
         rows: list[tuple[str, str, Optional[str]]] = [
             ("Walk-Forward Efficiency", wfe_text, _wfe_color(result.wfe_pct)),
-            (f"Удержание критерия IS→OOS", retention_text,
+            ("Удержание критерия IS→OOS", retention_text,
              _wfe_color(result.metric_retention_pct)),
             ("Окон (валидных / всего)",
              f"{sum(1 for w in result.windows if w.valid)} / {result.n_windows}",

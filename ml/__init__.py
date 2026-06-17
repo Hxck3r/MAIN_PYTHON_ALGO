@@ -21,8 +21,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # подсказки типов без рантайм-импорта тяжёлых модулей
-    from ml.domain import FeatureSet, ModelResult
-    from ml.experiment import RunBundle
+    # Реэкспорт для статических анализаторов: в рантайме имена резолвятся лениво
+    # через __getattr__ (см. _LAZY ниже), поэтому ruff не видит их использования.
+    from ml.domain import FeatureSet, ModelResult  # noqa: F401
+    from ml.experiment import RunBundle  # noqa: F401
 
 # Имя -> (подмодуль, атрибут). Резолвится лениво в __getattr__.
 _LAZY: dict[str, tuple[str, str]] = {
