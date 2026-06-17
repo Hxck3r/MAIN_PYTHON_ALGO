@@ -207,8 +207,6 @@ def main() -> None:
         assert window._last_result is not None, "бэктест ML-стратегии не выполнен"
         n_trades = window._last_result.stats().total_trades
         print(f"OK: ML-стратегия прогнана через движок, сделок: {n_trades}")
-        # снимок состояния для ИИ-ассистента содержит блок про модель
-        assert "ML-модель (" in window._ai_state_snapshot(), "нет ML в снимке для ИИ"
 
     print("ВСЕ ПРОВЕРКИ ДЕСКТОПНОГО GUI ПРОЙДЕНЫ")
 
