@@ -68,3 +68,6 @@ class ModelResult:
     # Сторона первичного сигнала {-1,+1} на OOS-барах (мета-разметка) — её «проигрывает»
     # MetaLabelStrategy; пусто для обычных режимов.
     oos_side: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    # Sharpe (net издержек) по каждому backtest-пути CPCV (AFML гл. 12); пусто для
+    # holdout/walk_forward. Распределение → честная робастность края, а не одна точка.
+    cpcv_sharpes: list[float] = field(default_factory=list)

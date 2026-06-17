@@ -432,6 +432,7 @@ class MainWindow(QMainWindow):
         self.ml_panel.train_requested.connect(self._run_ml_training)
         self.ml_panel.save_requested.connect(self._save_ml_clicked)
         self.ml_panel.load_requested.connect(self._load_ml_clicked)
+        self.ml_panel.registry_requested.connect(self._open_ml_registry)
         self.ml_panel.apply_requested.connect(self._apply_ml_to_strategy)
         self.tabs.addTab(self.ml_panel, "🧠 Машинное обучение")
         # Зависимости ML (sklearn/lightgbm) грузятся лениво при первом открытии вкладки.
@@ -927,17 +928,31 @@ class MainWindow(QMainWindow):
         self._ml_bundle_path = str(saved)
         self._log(f"Модель сохранена: {saved}")
 
-    def _load_ml_clicked(self) -> None:
-        from types import SimpleNamespace
-
+    def _open_ml_registry(self) -> None:
+        """Открыть реестр сохранённых прогонов (сравнение + гигиена отбора)."""
         from ml.config import MODELS_DIR
-        from ml.experiment import load_bundle
+
+        from .ml_registry import RunRegistryDialog
+
+        dlg = RunRegistryDialog(str(MODELS_DIR), parent=self)
+        dlg.run_chosen.connect(self._load_ml_from_path)
+        dlg.exec()
+
+    def _load_ml_clicked(self) -> None:
+        from ml.config import MODELS_DIR
 
         path, _ = QFileDialog.getOpenFileName(
             self, "Загрузить модель", str(MODELS_DIR), "Артефакт модели (*.joblib)",
         )
-        if not path:
-            return
+        if path:
+            self._load_ml_from_path(path)
+
+    def _load_ml_from_path(self, path: str) -> None:
+        """Загрузить артефакт по пути (из диалога файла или реестра) и показать в панели."""
+        from types import SimpleNamespace
+
+        from ml.experiment import load_bundle
+
         try:
             bundle = load_bundle(path)
         except Exception as exc:  # noqa: BLE001
@@ -960,6 +975,7 @@ class MainWindow(QMainWindow):
             y_proba=bundle.oos_proba,
             y_true=getattr(bundle, "oos_true", _pd.Series(dtype=float)),
             oos_fwd=getattr(bundle, "oos_fwd", _pd.Series(dtype=float)),
+            cpcv_sharpes=getattr(bundle, "cpcv_sharpes", []) or [],
         )
         self.ml_panel.ensure_models_loaded()
         self.ml_panel.show_result(self._last_ml_mr)

@@ -55,7 +55,9 @@ PRESETS = [("Лёгкий (быстро)", "light"), ("Стандарт", "stand
            ("Расширенный", "extended")]
 TARGETS = [("Направление цены", "direction"), ("Тройной барьер", "triple_barrier"),
            ("Мета-разметка (López de Prado)", "meta")]
-VALIDATIONS = [("Walk-forward (честно)", "walk_forward"), ("Holdout (быстро)", "holdout")]
+VALIDATIONS = [("Walk-forward (честно)", "walk_forward"),
+               ("CPCV (распределение путей)", "cpcv"),
+               ("Holdout (быстро)", "holdout")]
 PRIMARIES = [("MA-кросс (тренд)", "ma_cross"), ("Моментум", "momentum")]
 
 
@@ -113,9 +115,18 @@ def verdict(metrics: dict) -> tuple[str, str]:
         return (f"⚠ Край не пережил множественное тестирование (DSR {dsr:.2f} при "
                 f"{int(n_trials)} пробах подбора). Вероятен артефакт перебора — "
                 "сократите число проб, упростите модель или добавьте данных.", COLOR_WARN)
+    # CPCV: распределение по путям — самый честный тест устойчивости края.
+    n_paths = metrics.get("cpcv_n_paths", 0.0)
+    frac_pos = metrics.get("cpcv_prob_positive", float("nan"))
+    if n_paths > 0 and np.isfinite(frac_pos) and frac_pos < 0.6:
+        return (f"⚠ Край неустойчив по CPCV: лишь {frac_pos * 100:.0f}% из "
+                f"{int(n_paths)} путей прибыльны. Вероятен артефакт одного разбиения — "
+                "упростите модель/признаки или добавьте данных.", COLOR_WARN)
     strength = "уверенное" if auc >= 0.55 else "слабое, но устойчивое и значимое"
     ic_txt = f", IC {ic:+.3f}" if np.isfinite(ic) else ""
-    return (f"✅ {strength} преимущество вне обучения (AUC {auc:.3f}±{std:.3f}{ic_txt}). "
+    cpcv_txt = (f" CPCV: {frac_pos * 100:.0f}% путей прибыльны."
+                if n_paths > 0 and np.isfinite(frac_pos) else "")
+    return (f"✅ {strength} преимущество вне обучения (AUC {auc:.3f}±{std:.3f}{ic_txt}).{cpcv_txt} "
             "Подтвердите бэктестом и Монте-Карло/PBO.", COLOR_GOOD)
 
 
@@ -166,9 +177,12 @@ class MlSummaryTable(QTableWidget):
             ("IC (вероятность ↔ доходность)",
              f"{ic:+.3f} (p={icp:.3f})" if np.isfinite(ic) else "—", sig_color(icp)),
             ("— Робастность сигнала —", "", None),
-            ("OOS Sharpe сигнала (за бар)",
+            ("OOS Sharpe сигнала (net, за бар)",
              f"{m['oos_sharpe']:.3f}" if np.isfinite(m.get("oos_sharpe", float("nan"))) else "—",
              None),
+            ("Издержки в оценке (на оборот)",
+             f"{m['cost_bps']:.1f} б.п." if m.get("cost_bps", 0.0) else "не учтены",
+             None if m.get("cost_bps", 0.0) else COLOR_WARN),
             ("PSR (P[Sharpe>0])",
              f"{m['psr']:.3f}" if np.isfinite(m.get("psr", float("nan"))) else "—",
              sig_color(1.0 - m["psr"]) if np.isfinite(m.get("psr", float("nan"))) else None),
@@ -197,6 +211,26 @@ class MlSummaryTable(QTableWidget):
             ("Режим ряда (VR, q=5)",
              f"{vr:.2f} — {vr_label(vr)}" if np.isfinite(vr) else "—", None),
         ]
+        # CPCV: распределение OOS-Sharpe по путям (если обучали в режиме CPCV).
+        n_paths = int(m.get("cpcv_n_paths", 0))
+        if n_paths > 0:
+            fp = m.get("cpcv_prob_positive", float("nan"))
+            sh_mean = m.get("cpcv_sharpe_mean", float("nan"))
+            sh_std = m.get("cpcv_sharpe_std", float("nan"))
+            sh_min = m.get("cpcv_sharpe_min", float("nan"))
+            fp_color = (COLOR_GOOD if np.isfinite(fp) and fp >= 0.95
+                        else (COLOR_WARN if np.isfinite(fp) and fp >= 0.6 else COLOR_BAD))
+            rows += [
+                ("— CPCV (робастность по путям) —", "", None),
+                (f"Путей с краем > 0 ({n_paths} путей)",
+                 f"{fp * 100:.0f}%" if np.isfinite(fp) else "—", fp_color),
+                ("CPCV Sharpe (среднее ± σ)",
+                 f"{sh_mean:.3f} ± {sh_std:.3f}" if np.isfinite(sh_mean) else "—", None),
+                ("CPCV Sharpe худшего пути",
+                 f"{sh_min:.3f}" if np.isfinite(sh_min) else "—",
+                 COLOR_GOOD if (np.isfinite(sh_min) and sh_min > 0) else COLOR_WARN),
+            ]
+
         if cm and len(cm) == 2:
             rows.append(("Матрица ошибок [TN FP / FN TP]",
                          f"{cm[0][0]} {cm[0][1]} / {cm[1][0]} {cm[1][1]}", None))
@@ -224,6 +258,7 @@ class MlPanel(QWidget):
     save_requested = Signal()
     load_requested = Signal()
     apply_requested = Signal()      # → В стратегию
+    registry_requested = Signal()   # открыть реестр прогонов
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -330,10 +365,22 @@ class MlPanel(QWidget):
             self.combo_validation.addItem(label, key)
         self.combo_validation.setToolTip(
             "Walk-forward — честная временная кросс-валидация (рекомендуется). "
-            "Holdout — один сплit train/test (быстрее, оптимистичнее)."
+            "CPCV (López de Prado, гл. 12) — комбинаторно-очищенная CV: строит МНОГО "
+            "out-of-sample путей и даёт распределение Sharpe (робастность края, а не одна "
+            "точка); дороже. Holdout — один сплит train/test (быстрее, оптимистичнее)."
         )
+        self.combo_validation.currentIndexChanged.connect(self._on_validation_changed)
         self.spin_splits = QSpinBox(minimum=2, maximum=20, value=5)
-        self.spin_splits.setToolTip("Число out-of-sample фолдов walk-forward.")
+        self.spin_splits.setToolTip(
+            "Walk-forward: число out-of-sample фолдов. CPCV: число групп N "
+            "(путей = C(N-1, k-1), обучений = C(N, k))."
+        )
+        self.spin_cpcv_k = QSpinBox(minimum=1, maximum=6, value=2)
+        self.spin_cpcv_k.setEnabled(False)
+        self.spin_cpcv_k.setToolTip(
+            "CPCV: число тест-групп k в комбинации. Больше k → больше путей и точнее "
+            "распределение, но дороже. Типично k=2."
+        )
         self.spin_embargo = QSpinBox(minimum=0, maximum=500, value=0)
         self.spin_embargo.setToolTip(
             "Эмбарго: дополнительный зазор в барах между train и test (сверх горизонта). "
@@ -375,7 +422,8 @@ class MlPanel(QWidget):
         self.chk_tune.toggled.connect(self.spin_tune_trials.setEnabled)
         model_form.addRow("Модель:", self.combo_model)
         model_form.addRow("Валидация:", self.combo_validation)
-        model_form.addRow("Фолдов:", self.spin_splits)
+        model_form.addRow("Фолдов / групп:", self.spin_splits)
+        model_form.addRow("CPCV: тест-групп k:", self.spin_cpcv_k)
         model_form.addRow("Эмбарго:", self.spin_embargo)
         model_form.addRow(self.chk_balance)
         model_form.addRow(self.chk_calibrate)
@@ -393,12 +441,19 @@ class MlPanel(QWidget):
         self.btn_save.clicked.connect(self.save_requested.emit)
         self.btn_load = QPushButton("📂 Загрузить")
         self.btn_load.clicked.connect(self.load_requested.emit)
+        self.btn_registry = QPushButton("📊 Реестр")
+        self.btn_registry.setToolTip(
+            "Реестр всех сохранённых прогонов: сравнение по net OOS-Sharpe / DSR / CPCV "
+            "и предупреждение о селекционном смещении (много прогонов на одних данных)."
+        )
+        self.btn_registry.clicked.connect(self.registry_requested.emit)
         self.btn_apply = QPushButton("→ В стратегию")
         self.btn_apply.clicked.connect(self.apply_requested.emit)
         for b in (self.btn_save, self.btn_apply):
             b.setEnabled(False)
         btn_row.addWidget(self.btn_save)
         btn_row.addWidget(self.btn_load)
+        btn_row.addWidget(self.btn_registry)
         btn_row.addWidget(self.btn_apply)
 
         self.lbl_verdict = QLabel("Обучите модель, чтобы увидеть оценку качества.")
@@ -445,6 +500,21 @@ class MlPanel(QWidget):
         )
         self.spin_thr.valueChanged.connect(self._on_threshold_changed)
         thr_row.addWidget(self.spin_thr)
+        # Издержки на оборот (односторонние, б.п.): честная net-оценка сигнала. Влияют
+        # и на обучение (метрика OOS-Sharpe/дефляция), и на интерактивный пересчёт.
+        thr_row.addWidget(QLabel("Издержки:"))
+        self.spin_cost = QDoubleSpinBox(minimum=0.0, maximum=50.0, value=2.0)
+        self.spin_cost.setSingleStep(0.5)
+        self.spin_cost.setDecimals(1)
+        self.spin_cost.setSuffix(" б.п.")
+        self.spin_cost.setToolTip(
+            "Издержки на оборот (комиссия+спред+проскальзывание, односторонние, в "
+            "базисных пунктах). Вычитаются при каждой смене позиции. Sharpe, эквити и "
+            "дефляция (PSR/DSR) считаются ЗА вычетом издержек — слабый «значимый» край "
+            "обычно умирает именно от costs × turnover. Двигайте — пересчёт мгновенный."
+        )
+        self.spin_cost.valueChanged.connect(self._on_threshold_changed)
+        thr_row.addWidget(self.spin_cost)
         self.lbl_thr = QLabel("—")
         self.lbl_thr.setStyleSheet("color: #c8c8c8;")
         thr_row.addWidget(self.lbl_thr, stretch=1)
@@ -467,6 +537,9 @@ class MlPanel(QWidget):
                                                                "OOS-эквити сигнала (лонг/флэт)")
         # Страница 4: кривая размера ставки (bet sizing) от вероятности.
         self.size_plot = self._add_single_chart_page("Сайзинг", "Размер ставки от вероятности")
+        # Страница 5: распределение OOS-Sharpe по путям CPCV (робастность края).
+        self.cpcv_plot = self._add_single_chart_page(
+            "CPCV", "Распределение OOS-Sharpe по путям (CPCV)")
 
     def _add_chart_page(self, tab_title: str, title_top: str, title_bottom: str):
         """Создать вкладку с двумя графиками (верх/низ) и вернуть (top_plot, bottom_plot)."""
@@ -530,6 +603,10 @@ class MlPanel(QWidget):
         if is_meta and not self.chk_betsize.isChecked():
             self.chk_betsize.setChecked(True)
 
+    def _on_validation_changed(self) -> None:
+        """Параметр k активен только для CPCV (для walk-forward/holdout не используется)."""
+        self.spin_cpcv_k.setEnabled(self.combo_validation.currentData() == "cpcv")
+
     def selected_size_mode(self) -> str:
         """Режим сайзинга для стратегии: confidence (bet sizing) или fixed."""
         return "confidence" if self.chk_betsize.isChecked() else "fixed"
@@ -550,6 +627,7 @@ class MlPanel(QWidget):
             "model_name": self.combo_model.currentData() or "random_forest",
             "validation": self.combo_validation.currentData(),
             "n_splits": self.spin_splits.value(),
+            "cpcv_k": self.spin_cpcv_k.value(),
             "embargo": self.spin_embargo.value(),
             "balance_classes": self.chk_balance.isChecked(),
             "calibrate": self.chk_calibrate.isChecked(),
@@ -558,6 +636,7 @@ class MlPanel(QWidget):
             "compute_mda": self.chk_mda.isChecked(),
             "tune": self.chk_tune.isChecked(),
             "tune_trials": self.spin_tune_trials.value(),
+            "cost_bps": self.spin_cost.value(),
         }
 
     def _emit_train(self) -> None:
@@ -568,6 +647,7 @@ class MlPanel(QWidget):
     def set_running(self, running: bool) -> None:
         self.btn_train.setEnabled(not running and self._models_loaded)
         self.btn_load.setEnabled(not running)
+        self.btn_registry.setEnabled(not running)
         self.btn_save.setEnabled(not running and self._has_result)
         self.btn_apply.setEnabled(not running and self._has_result)
 
@@ -594,8 +674,8 @@ class MlPanel(QWidget):
         if self._yt is not None and self._yp is not None and self._yt.size != self._yp.size:
             self._yt = None                      # рассинхрон (старый адаптер) — без меток
 
-        for plot in (self.imp_plot, self.fold_plot, self.calib_plot,
-                     self.roc_plot, self.hist_plot, self.equity_plot, self.size_plot):
+        for plot in (self.imp_plot, self.fold_plot, self.calib_plot, self.roc_plot,
+                     self.hist_plot, self.equity_plot, self.size_plot, self.cpcv_plot):
             plot.clear()
             plot.addItem(make_grid_item())
         self._roc_marker = None
@@ -606,6 +686,15 @@ class MlPanel(QWidget):
         self._draw_roc()
         self._draw_prob_hist()
         self._draw_betsize(mr)
+        self._draw_cpcv(mr)
+
+        # Издержки, заложенные при обучении (для загруженных артефактов) — синхронизируем
+        # слайдер, чтобы интерактивная net-эквити совпадала с метриками прогона.
+        cost_bps = getattr(mr, "metrics", {}).get("cost_bps")
+        if cost_bps is not None and np.isfinite(cost_bps):
+            self.spin_cost.blockSignals(True)
+            self.spin_cost.setValue(float(cost_bps))
+            self.spin_cost.blockSignals(False)
 
         # Инициализировать слайдер порогом модели и пересчитать зависимые графики.
         have_interactive = self._yt is not None and self._yp is not None
@@ -722,23 +811,38 @@ class MlPanel(QWidget):
                 x=edges, y=hist, stepMode=True, fillLevel=0.0,
                 brush=pg.mkBrush(*color), pen=pg.mkPen(color[:3] + (220,), width=1)))
 
+    def _signal_net_returns(self, thr: float) -> Optional[np.ndarray]:
+        """Чистая OOS-доходность «лонг/флэт» сигнала: позиция × доход − издержки×оборот."""
+        if self._fwd is None or self._yp is None:
+            return None
+        fwd = np.nan_to_num(self._fwd, nan=0.0)
+        pos = (self._yp >= thr).astype(float)
+        ret = pos * fwd
+        cost = float(self.spin_cost.value()) / 1e4
+        if cost > 0.0:
+            turnover = np.abs(np.diff(pos, prepend=0.0))   # вход/выход = оборот
+            ret = ret - turnover * cost
+        return ret
+
     def _draw_equity(self, thr: float) -> None:
-        """Кумулятивная OOS-доходность «лонг/флэт» сигнала при заданном пороге."""
+        """Кумулятивная OOS-доходность «лонг/флэт» сигнала (net издержек) при пороге."""
         self.equity_plot.clear()
         self.equity_plot.addItem(make_grid_item())
         self.equity_plot.setLabel("bottom", "OOS-бар")
         self.equity_plot.setLabel("left", "кумулятивная доходность")
         self.equity_plot.addItem(pg.InfiniteLine(
             0.0, angle=0, pen=pg.mkPen(CHANCE, style=QtCore.Qt.PenStyle.DotLine)))
-        if self._fwd is None or self._yp is None:
+        ret = self._signal_net_returns(thr)
+        if ret is None:
             return
         fwd = np.nan_to_num(self._fwd, nan=0.0)
         # Buy & hold по тем же OOS-барам — контекст для оценки сигнала.
         bh = np.cumsum(fwd)
         self.equity_plot.addItem(pg.PlotCurveItem(
             x=np.arange(bh.size), y=bh, pen=pg.mkPen(CHANCE, width=1, style=QtCore.Qt.PenStyle.DashLine)))
-        pos = (self._yp >= thr).astype(float)
-        equity = np.cumsum(pos * fwd)
+        net_label = " (net издержек)" if self.spin_cost.value() > 0 else ""
+        self.equity_plot.setTitle(f"OOS-эквити сигнала (лонг/флэт){net_label}")
+        equity = np.cumsum(ret)
         self.equity_plot.addItem(pg.PlotCurveItem(
             x=np.arange(equity.size), y=equity, pen=pg.mkPen(COLOR_GOOD, width=2)))
 
@@ -768,6 +872,42 @@ class MlPanel(QWidget):
             thr, angle=90, pen=pg.mkPen(COLOR_WARN, style=QtCore.Qt.PenStyle.DashLine),
             label=f"порог {thr:.2f}", labelOpts={"color": COLOR_WARN, "position": 0.9}))
 
+    def _draw_cpcv(self, mr) -> None:
+        """Гистограмма OOS-Sharpe по backtest-путям CPCV (AFML гл. 12) — робастность края.
+
+        Узкое распределение справа от нуля → край держится на разных разбиениях; широкое
+        или сидящее на нуле → вероятный артефакт одного пути.
+        """
+        self.cpcv_plot.setLabel("bottom", "OOS-Sharpe пути (net издержек)")
+        self.cpcv_plot.setLabel("left", "число путей")
+        sharpes = np.asarray(getattr(mr, "cpcv_sharpes", None) or [], dtype=float)
+        sharpes = sharpes[np.isfinite(sharpes)]
+        if sharpes.size == 0:
+            self.cpcv_plot.setTitle(
+                "Распределение OOS-Sharpe по путям — выберите валидацию «CPCV» и обучите")
+            return
+        self.cpcv_plot.setTitle(
+            f"Распределение OOS-Sharpe по {sharpes.size} путям CPCV")
+        lo, hi = float(sharpes.min()), float(sharpes.max())
+        if hi - lo < 1e-9:
+            lo, hi = lo - 0.5, hi + 0.5
+        edges = np.linspace(lo, hi, min(21, max(6, sharpes.size // 2 + 2)))
+        hist, _ = np.histogram(sharpes, bins=edges)
+        self.cpcv_plot.addItem(pg.PlotCurveItem(
+            x=edges, y=hist, stepMode=True, fillLevel=0.0,
+            brush=pg.mkBrush(79, 156, 247, 110), pen=pg.mkPen("#4f9cf7", width=1)))
+        # Ноль (граница края) и среднее по путям.
+        self.cpcv_plot.addItem(pg.InfiniteLine(
+            0.0, angle=90, pen=pg.mkPen(CHANCE, style=QtCore.Qt.PenStyle.DotLine),
+            label="0", labelOpts={"color": CHANCE, "position": 0.92}))
+        mean = float(sharpes.mean())
+        frac_pos = float(np.mean(sharpes > 0))
+        col = COLOR_GOOD if frac_pos >= 0.95 else (COLOR_WARN if frac_pos >= 0.6 else COLOR_BAD)
+        self.cpcv_plot.addItem(pg.InfiniteLine(
+            mean, angle=90, pen=pg.mkPen(col, width=2),
+            label=f"среднее {mean:.2f} · путей>0: {frac_pos*100:.0f}%",
+            labelOpts={"color": col, "position": 0.92}))
+
     def _on_threshold_changed(self) -> None:
         """Пересчитать метрики/маркер/эквити под текущий порог — без переобучения."""
         thr = float(self.spin_thr.value())
@@ -789,10 +929,10 @@ class MlPanel(QWidget):
         parts = [f"P {precision:.2f}", f"R {recall:.2f}", f"F1 {f1:.2f}",
                  f"сигналов {n_sig} ({share:.0f}%)"]
         if self._fwd is not None and n_sig:
-            ret = pred.astype(float) * np.nan_to_num(self._fwd, nan=0.0)
-            sh = _sharpe(ret)
-            exp = float(np.mean(self._fwd[pred == 1])) * 100.0
-            parts.append(f"Sharpe {sh:.2f}")
+            net = self._signal_net_returns(thr)           # Sharpe — за вычетом издержек
+            sh = _sharpe(net) if net is not None else float("nan")
+            exp = float(np.mean(self._fwd[pred == 1])) * 100.0   # валовая ожидаемость входа
+            parts.append(f"Sharpe(net) {sh:.2f}")
             parts.append(f"E[r] {exp:+.3f}%")
         self.lbl_thr.setText(" · ".join(parts))
 

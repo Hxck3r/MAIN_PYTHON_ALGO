@@ -49,8 +49,12 @@ class TrainConfig:
     model_name: str = field(default_factory=model_factory.default_model_name)
     params: dict[str, Any] | None = None
     train_ratio: float = config.DEFAULT_TRAIN_RATIO
-    validation: str = "walk_forward"        # "holdout" | "walk_forward"
+    validation: str = "walk_forward"        # "holdout" | "walk_forward" | "cpcv"
     n_splits: int = 5
+    # CPCV (AFML гл. 12): число тест-групп k в комбинации. Групп всего = n_splits.
+    # Путей = C(n_splits-1, k-1); обучений = C(n_splits, k). Больше k → больше путей и
+    # стоимость. Включается, когда validation == "cpcv".
+    cpcv_k: int = 2
     embargo: int = 0                         # доп. зазор в барах сверх горизонта
     balance_classes: bool = True
     calibrate: bool = False                  # калибровать вероятности (Platt/sigmoid)
@@ -68,8 +72,18 @@ class TrainConfig:
     # меньше лишних деревьев). Применяется только к некалиброванному LightGBM.
     early_stopping: bool = True
     early_stopping_rounds: int = 30
+    # Издержки на оборот (ОДНОсторонние, в базисных пунктах) для честной OOS-оценки
+    # сигнала: Sharpe, эквити и дефляция (PSR/DSR) считаются ЗА вычетом издержек ×
+    # оборот позиции. 0 — без издержек (оптимистично). Слабый, но «значимый» край на
+    # частых данных обычно умирает от costs × turnover — поэтому учитываем сразу.
+    cost_bps: float = 0.0
     # Sharpe OOS-сигнала по пробам подбора гиперпараметров — для дефляции (DSR).
     tune_trial_sharpes: list[float] | None = None
+
+    @property
+    def cost_frac(self) -> float:
+        """Издержки на единицу оборота в долях цены (б.п. → доля)."""
+        return max(0.0, float(self.cost_bps)) / 1e4
 
 
 def _emit(cb: ProgressCb, pct: int, msg: str) -> None:
@@ -109,17 +123,18 @@ def _fit_with_weight(model: Any, X, y, w: np.ndarray | None) -> None:
 
 
 def _fit_lgbm_early_stop(
-    cfg: TrainConfig, model: Any, X_tr, y_tr, w_tr: np.ndarray | None
+    cfg: TrainConfig, model: Any, X_tr, y_tr, w_tr: np.ndarray | None, purge_gap: int = 1
 ) -> bool:
     """Обучить LightGBM с ранней остановкой по валидационному хвосту. True — успех.
 
-    Последние ~15% train (с зазором ``horizon`` от точки обучения) используются как
-    eval_set; число деревьев подбирается автоматически — быстрее и устойчивее. При
-    нехватке данных/одном классе в хвосте — откат (False) на обычное обучение.
+    Последние ~15% train (с purge-зазором ``horizon+embargo`` от точки обучения)
+    используются как eval_set; число деревьев подбирается автоматически — быстрее и
+    устойчивее. При нехватке данных/одном классе в хвосте — откат (False) на обычное
+    обучение.
     """
     n = len(X_tr)
     val = max(50, int(n * 0.15))
-    gap = max(1, cfg.embargo)                       # минимальный зазор fit↔val
+    gap = max(1, purge_gap)                          # purge-зазор fit↔val (без утечки)
     fit_end = n - val - gap
     if fit_end < 100:
         return False
@@ -142,8 +157,45 @@ def _fit_lgbm_early_stop(
         return False
 
 
+def _fit_calibrated_temporal(
+    model: Any, X_tr, y_tr, w_tr: np.ndarray | None, purge_gap: int
+) -> Any | None:
+    """Калибровка вероятностей (Platt/sigmoid) БЕЗ утечки во времени.
+
+    Обычный ``CalibratedClassifierCV(cv=k)`` перемешивает наблюдения (random KFold) —
+    на временном ряду это заглядывание в будущее, а калиброванная вероятность затем
+    управляет размером ставки. Здесь честно по времени: базовая модель учится на
+    «голове» train, а сигмоидный калибратор подгоняется на её «хвосте» с purge-зазором
+    (``horizon+embargo``). Возвращает обёртку или ``None`` (данных мало — откат).
+    """
+    n = len(X_tr)
+    calib = max(50, int(n * 0.3))
+    gap = max(1, purge_gap)
+    fit_end = n - calib - gap
+    if fit_end < 100:
+        return None
+    y_fit, y_cal = y_tr.iloc[:fit_end], y_tr.iloc[n - calib:]
+    if y_fit.nunique() < 2 or y_cal.nunique() < 2:
+        return None
+    try:
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.frozen import FrozenEstimator
+    except Exception:  # noqa: BLE001 — старый sklearn без FrozenEstimator
+        return None
+    w_fit = w_tr[:fit_end] if w_tr is not None else None
+    _fit_with_weight(model, X_tr.iloc[:fit_end], y_fit, w_fit)
+    try:
+        # FrozenEstimator замораживает уже обученную базу — fit лишь подгоняет калибратор
+        # на отложенном хвосте (база не переобучается, утечки нет).
+        cal = CalibratedClassifierCV(FrozenEstimator(model), method="sigmoid")
+        cal.fit(X_tr.iloc[n - calib:], y_cal)
+    except Exception:  # noqa: BLE001 — калибровка не критична
+        return None
+    return cal
+
+
 def _fit_predict(
-    cfg: TrainConfig, X_tr, y_tr, X_te, w_tr: np.ndarray | None = None
+    cfg: TrainConfig, X_tr, y_tr, X_te, w_tr: np.ndarray | None = None, purge_gap: int = 1
 ) -> tuple[Any, np.ndarray]:
     """Обучить модель на train-фолде и вернуть (модель, вероятности на test)."""
     model = model_factory.build_model(
@@ -153,13 +205,13 @@ def _fit_predict(
     # Ранняя остановка имеет смысл только для голого LightGBM (калибровочная обёртка
     # сама делает CV и несовместима с eval_set).
     if (cfg.early_stopping and not calibrate and cfg.model_name == "lightgbm"
-            and _fit_lgbm_early_stop(cfg, model, X_tr, y_tr, w_tr)):
+            and _fit_lgbm_early_stop(cfg, model, X_tr, y_tr, w_tr, purge_gap)):
         return model, _predict_proba(model, X_te)
     if calibrate:
-        from sklearn.calibration import CalibratedClassifierCV
-
-        # sigmoid (Platt) устойчивее isotonic на небольших выборках и легче по CPU.
-        model = CalibratedClassifierCV(model, method="sigmoid", cv=3)
+        cal = _fit_calibrated_temporal(model, X_tr, y_tr, w_tr, purge_gap)
+        if cal is not None:
+            return cal, _predict_proba(cal, X_te)
+        log.warning("Калибровка пропущена: мало данных для honest temporal split — обучаю без неё.")
     _fit_with_weight(model, X_tr, y_tr, w_tr)
     return model, _predict_proba(model, X_te)
 
@@ -183,11 +235,21 @@ def _oos_side(fs: FeatureSet, index: pd.Index) -> pd.Series | None:
     return fs.frame[fs.side_column].reindex(index).rename("oos_side")
 
 
-def _signal_returns(fwd1: pd.Series, index: pd.Index, proba, thr: float) -> pd.Series:
-    """OOS-доходность простого «лонг/флэт» сигнала: позиция × доходность следующего бара."""
+def _signal_returns(
+    fwd1: pd.Series, index: pd.Index, proba, thr: float, cost: float = 0.0
+) -> pd.Series:
+    """OOS-доходность «лонг/флэт» сигнала: позиция × доходность след. бара − издержки.
+
+    ``cost`` — издержки на единицу оборота (доля цены); вычитаются при каждой смене
+    позиции (вход/выход), оборот = ``|Δ позиции|``. ``cost=0`` — валовая доходность.
+    """
     pos = (np.asarray(proba, dtype=float) >= thr).astype(float)
     r = np.nan_to_num(fwd1.reindex(index).to_numpy(dtype=float), nan=0.0)
-    return pd.Series(pos * r, index=index, name="oos_returns")
+    ret = pos * r
+    if cost > 0.0:
+        turnover = np.abs(np.diff(pos, prepend=0.0))   # вход из кэша/выход = оборот 1
+        ret = ret - turnover * cost
+    return pd.Series(ret, index=index, name="oos_returns")
 
 
 def _sharpe(returns) -> float:
@@ -302,6 +364,7 @@ def _assemble(
     metrics = _evaluate(y_true, y_pred, y_proba)
     metrics.update(extra)
     metrics["threshold"] = float(threshold)
+    metrics["cost_bps"] = float(cfg.cost_bps)          # издержки, заложенные в OOS-оценку
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
     importances = _feature_importances(final_model, fs.feature_columns)
     spec = model_factory.MODEL_SPECS[cfg.model_name]
@@ -355,12 +418,12 @@ def _train_holdout(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) -> Mo
         raise ValueError("В обучающей выборке один класс — измените порог/горизонт target.")
 
     _emit(progress, 35, "Обучение модели…")
-    model, proba = _fit_predict(cfg, X_train, y_train, X_test, w_train)
+    model, proba = _fit_predict(cfg, X_train, y_train, X_test, w_train, gap)
     proba_s = pd.Series(proba, index=X_test.index)
     _emit(progress, 80, "Оценка и подбор порога…")
     thr = _optimize_threshold(y_test, proba_s, cfg.threshold_metric) if cfg.optimize_threshold else 0.5
 
-    oos_returns = _signal_returns(fwd1, X_test.index, proba, thr)
+    oos_returns = _signal_returns(fwd1, X_test.index, proba, thr, cfg.cost_frac)
     oos_fwd = fwd1.reindex(X_test.index).rename("oos_fwd")
     mda: dict[str, float] = {}
     if cfg.compute_mda:
@@ -385,6 +448,7 @@ def _train_walk_forward(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) 
     fwd1 = frame["close"].pct_change().shift(-1)     # доходность следующего бара (для OOS-pnl)
     weights = _sample_weights(fs, cfg)
 
+    purge_gap = max(1, fs.horizon) + max(0, cfg.embargo)
     splitter = PurgedWalkForwardSplit(
         n_splits=cfg.n_splits, horizon=max(1, fs.horizon), embargo=cfg.embargo
     )
@@ -405,7 +469,7 @@ def _train_walk_forward(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) 
             log.warning("Фолд %d пропущен: в train один класс.", i + 1)
             continue
         w_tr = weights[tr] if weights is not None else None
-        model, proba = _fit_predict(cfg, X.iloc[tr], y_tr, X.iloc[te], w_tr)
+        model, proba = _fit_predict(cfg, X.iloc[tr], y_tr, X.iloc[te], w_tr, purge_gap)
         idx = X.iloc[te].index
         proba_s = pd.Series(proba, index=idx)
         y_te = y.iloc[te]
@@ -414,7 +478,7 @@ def _train_walk_forward(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) 
         fm = _evaluate(y_te, (proba >= 0.5).astype(int), proba)
         fm["fold"] = i + 1
         fm["test_size"] = float(len(te))
-        fm["sharpe"] = _sharpe(_signal_returns(fwd1, idx, proba, 0.5))
+        fm["sharpe"] = _sharpe(_signal_returns(fwd1, idx, proba, 0.5, cfg.cost_frac))
         fold_metrics.append(fm)
         if cfg.compute_mda:
             vals = _permutation_importance_fold(model, X.iloc[te], y_te, fs.feature_columns, cfg.mda_repeats)
@@ -428,13 +492,13 @@ def _train_walk_forward(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) 
     proba_all = pd.concat(proba_parts).sort_index()
     y_all = pd.concat(true_parts).sort_index()
     thr = _optimize_threshold(y_all, proba_all, cfg.threshold_metric) if cfg.optimize_threshold else 0.5
-    oos_returns = _signal_returns(fwd1, proba_all.index, proba_all.to_numpy(), thr)
+    oos_returns = _signal_returns(fwd1, proba_all.index, proba_all.to_numpy(), thr, cfg.cost_frac)
     oos_fwd = fwd1.reindex(proba_all.index).rename("oos_fwd")
     mda = _normalize_importances(fs.feature_columns, mda_acc / mda_weight) if mda_weight > 0 else {}
 
     _emit(progress, 88, "Финальная модель на всех данных…")
     # Для сохранения/важностей дообучаем модель на всей доступной истории.
-    final_model, _ = _fit_predict(cfg, X, y, X.iloc[-1:], weights)
+    final_model, _ = _fit_predict(cfg, X, y, X.iloc[-1:], weights, purge_gap)
 
     aucs = [fm["roc_auc"] for fm in fold_metrics if fm["roc_auc"] == fm["roc_auc"]]
     extra = {
@@ -448,6 +512,120 @@ def _train_walk_forward(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) 
     return _assemble(cfg, fs, final_model, y_all, proba_all, thr, fold_metrics, extra,
                      oos_returns=oos_returns, importances_mda=mda, oos_fwd=oos_fwd,
                      oos_side=_oos_side(fs, proba_all.index))
+
+
+def _train_cpcv(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) -> ModelResult:
+    """Комбинаторно-очищенная CV (AFML гл. 12): распределение OOS-Sharpe по путям.
+
+    В отличие от walk-forward (один OOS-путь) строит ``C(N-1, k-1)`` backtest-путей и
+    усреднённый по сочетаниям OOS-ряд вероятностей (его и «проигрывает» MLStrategy).
+    Распределение Sharpe по путям → честная робастность края.
+    """
+    from ml.cpcv import CombinatorialPurgedCV, assemble_paths, make_groups
+
+    frame = fs.frame
+    X = frame[fs.feature_columns]
+    y = frame[fs.target_column].astype(int)
+    fwd1 = frame["close"].pct_change().shift(-1)
+    weights = _sample_weights(fs, cfg)
+    cost = cfg.cost_frac
+    n = len(frame)
+    purge_gap = max(1, fs.horizon) + max(0, cfg.embargo)
+
+    cv = CombinatorialPurgedCV(
+        n_groups=cfg.n_splits, test_groups=cfg.cpcv_k,
+        horizon=max(1, fs.horizon), embargo=cfg.embargo,
+    )
+    groups = make_groups(n, cfg.n_splits)
+    N = len(groups)
+    combos = list(cv.split(X))
+    if not combos:
+        raise ValueError("Не удалось сформировать CPCV-сочетания — мало данных/групп.")
+
+    sum_proba = np.zeros(n)
+    cnt = np.zeros(n)
+    preds_by_group: dict[int, list[np.ndarray]] = {g: [] for g in range(N)}
+    fold_metrics: list[dict] = []
+    mda_acc = np.zeros(len(fs.feature_columns))
+    mda_weight = 0.0
+
+    for i, (tr, te, combo) in enumerate(combos):
+        pct = 8 + int(72 * i / len(combos))
+        _emit(progress, pct, f"CPCV-сочетание {i + 1}/{len(combos)} (групп в тесте: {len(combo)})")
+        y_tr = y.iloc[tr]
+        if y_tr.nunique() < 2:
+            log.warning("Сочетание %d пропущено: в train один класс.", i + 1)
+            continue
+        w_tr = weights[tr] if weights is not None else None
+        model, proba = _fit_predict(cfg, X.iloc[tr], y_tr, X.iloc[te], w_tr, purge_gap)
+        proba_by_pos = dict(zip(te.tolist(), np.asarray(proba, dtype=float)))
+        sum_proba[te] += np.asarray(proba, dtype=float)
+        cnt[te] += 1.0
+        for g in combo:                              # разложить предсказания по группам
+            s, e = groups[g]
+            preds_by_group[g].append(np.array([proba_by_pos[p] for p in range(s, e)]))
+        y_te = y.iloc[te]
+        fm = _evaluate(y_te, (np.asarray(proba) >= 0.5).astype(int), proba)
+        fm["fold"] = i + 1
+        fm["test_size"] = float(len(te))
+        fm["sharpe"] = _sharpe(_signal_returns(fwd1, X.iloc[te].index, proba, 0.5, cost))
+        fold_metrics.append(fm)
+        if cfg.compute_mda:
+            vals = _permutation_importance_fold(model, X.iloc[te], y_te, fs.feature_columns, cfg.mda_repeats)
+            if vals is not None:
+                mda_acc += vals * len(te)
+                mda_weight += len(te)
+
+    covered = cnt > 0
+    if not covered.any():
+        raise ValueError("Все CPCV-сочетания вырождены (один класс в train) — измените target.")
+
+    # Усреднённый по сочетаниям OOS-ряд вероятностей (де-шумлённый) — единый честный OOS.
+    avg_proba = sum_proba[covered] / cnt[covered]
+    idx = frame.index[covered]
+    y_all = pd.Series(y.to_numpy()[covered], index=idx)
+    proba_all = pd.Series(avg_proba, index=idx)
+    thr = _optimize_threshold(y_all, proba_all, cfg.threshold_metric) if cfg.optimize_threshold else 0.5
+    oos_returns = _signal_returns(fwd1, idx, avg_proba, thr, cost)
+    oos_fwd = fwd1.reindex(idx).rename("oos_fwd")
+    mda = _normalize_importances(fs.feature_columns, mda_acc / mda_weight) if mda_weight > 0 else {}
+
+    # --- Распределение Sharpe по backtest-путям -------------------------------
+    paths = assemble_paths(preds_by_group, N)
+    path_sharpes: list[float] = []
+    for path_proba in paths:
+        r = _signal_returns(fwd1, frame.index, path_proba, thr, cost)
+        sh = _sharpe(r)
+        if np.isfinite(sh):
+            path_sharpes.append(float(sh))
+
+    _emit(progress, 88, "Финальная модель на всех данных…")
+    final_model, _ = _fit_predict(cfg, X, y, X.iloc[-1:], weights, purge_gap)
+
+    aucs = [fm["roc_auc"] for fm in fold_metrics if fm["roc_auc"] == fm["roc_auc"]]
+    extra = {
+        "n_folds": float(len(fold_metrics)),
+        "cv_auc_mean": float(np.mean(aucs)) if aucs else float("nan"),
+        "cv_auc_std": float(np.std(aucs)) if aucs else float("nan"),
+        "oos_size": float(len(y_all)),
+        "oos_sharpe": _sharpe(oos_returns),
+        "cpcv_n_paths": float(len(path_sharpes)),
+        "cpcv_n_combos": float(len(combos)),
+    }
+    if path_sharpes:
+        arr = np.asarray(path_sharpes)
+        extra.update({
+            "cpcv_sharpe_mean": float(arr.mean()),
+            "cpcv_sharpe_std": float(arr.std(ddof=1)) if len(arr) > 1 else 0.0,
+            "cpcv_sharpe_min": float(arr.min()),
+            "cpcv_prob_positive": float(np.mean(arr > 0)),   # доля путей с краем > 0
+        })
+    _emit(progress, 100, "Готово.")
+    mr = _assemble(cfg, fs, final_model, y_all, proba_all, thr, fold_metrics, extra,
+                   oos_returns=oos_returns, importances_mda=mda, oos_fwd=oos_fwd,
+                   oos_side=_oos_side(fs, idx))
+    mr.cpcv_sharpes = path_sharpes
+    return mr
 
 
 def _attach_significance(mr: ModelResult, fs: FeatureSet) -> None:
@@ -506,7 +684,9 @@ def train(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb = None) -> Mode
     """Обучить модель на :class:`FeatureSet` и вернуть :class:`ModelResult`."""
     if len(fs.frame) < 80:
         raise ValueError(f"Слишком мало строк для обучения: {len(fs.frame)}.")
-    if cfg.validation == "walk_forward":
+    if cfg.validation == "cpcv":
+        mr = _train_cpcv(fs, cfg, progress)
+    elif cfg.validation == "walk_forward":
         mr = _train_walk_forward(fs, cfg, progress)
     else:
         mr = _train_holdout(fs, cfg, progress)

@@ -489,11 +489,13 @@ def _train_config_from_settings(settings: dict[str, Any]):
         model_name=settings.get("model_name", "random_forest"),
         validation=settings.get("validation", "walk_forward"),
         n_splits=int(settings.get("n_splits", 5)),
+        cpcv_k=int(settings.get("cpcv_k", 2)),
         embargo=int(settings.get("embargo", 0)),
         balance_classes=bool(settings.get("balance_classes", True)),
         calibrate=bool(settings.get("calibrate", False)),
         use_sample_weights=bool(settings.get("sample_weights", True)),
         compute_mda=bool(settings.get("compute_mda", False)),
+        cost_bps=float(settings.get("cost_bps", 0.0)),
     )
 
 

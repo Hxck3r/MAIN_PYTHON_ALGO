@@ -136,6 +136,9 @@ def final_estimator(model: BaseEstimator) -> BaseEstimator:
     """Достать итоговый estimator: разворачивает Pipeline и калибровочную обёртку."""
     if isinstance(model, Pipeline):
         model = model.steps[-1][1]
+    # FrozenEstimator (temporal-калибровка) оборачивает уже обученную модель в .estimator.
+    if type(model).__name__ == "FrozenEstimator" and hasattr(model, "estimator"):
+        return final_estimator(model.estimator)
     # CalibratedClassifierCV прячет базовую модель внутри calibrated_classifiers_.
     if hasattr(model, "calibrated_classifiers_") and model.calibrated_classifiers_:
         cc = model.calibrated_classifiers_[0]

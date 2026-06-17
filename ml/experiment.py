@@ -25,7 +25,8 @@ from ml.domain import FeatureSet, ModelResult
 
 log = logging.getLogger(__name__)
 
-ARTIFACT_VERSION = 3          # v3: + oos_true/oos_fwd/importances_mda (интеракт. визуализация)
+ARTIFACT_VERSION = 4          # v4: + cpcv_sharpes (распределение OOS-Sharpe по путям CPCV)
+#                               v3: + oos_true/oos_fwd/importances_mda (интеракт. визуализация)
 
 
 def data_fingerprint(df: pd.DataFrame, source_path: Optional[str]) -> dict[str, Any]:
@@ -65,6 +66,8 @@ class RunBundle:
     oos_fwd: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     # Сторона первичного сигнала на OOS-барах (мета-разметка) — её играет MetaLabelStrategy.
     oos_side: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    # Sharpe по backtest-путям CPCV (AFML гл. 12) — для гистограммы робастности после загрузки.
+    cpcv_sharpes: list[float] = field(default_factory=list)
     fold_metrics: list[dict] = field(default_factory=list)
     importances: dict[str, float] = field(default_factory=dict)
     importances_mda: dict[str, float] = field(default_factory=dict)
@@ -104,6 +107,7 @@ def build_bundle(
         if len(mr.oos_fwd) else pd.Series(dtype=float),
         oos_side=pd.Series(mr.oos_side.values, index=mr.oos_side.index, name="oos_side")
         if len(mr.oos_side) else pd.Series(dtype=float),
+        cpcv_sharpes=list(getattr(mr, "cpcv_sharpes", []) or []),
         fold_metrics=list(mr.fold_metrics),
         importances=dict(mr.importances),
         importances_mda=dict(mr.importances_mda),

@@ -303,6 +303,143 @@ def test_bet_size_monotone_and_bounded():
     assert abs(bet_size_from_proba(0.8) - bet_size_from_proba(0.2)) < 1e-9
 
 
+# --- Издержки в OOS-оценке (честный net-Sharpe) ---------------------------- #
+def test_signal_returns_costs_penalize_turnover():
+    """Издержки вычитаются при каждой смене позиции (обороте); cost=0 — валовая."""
+    import numpy as np
+    import pandas as pd
+
+    from ml.trainer import _signal_returns
+
+    idx = pd.RangeIndex(6)
+    fwd = pd.Series([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], index=idx)   # нулевой доход
+    proba = np.array([0.9, 0.1, 0.9, 0.1, 0.9, 0.1])             # позиция дёргается каждый бар
+    gross = _signal_returns(fwd, idx, proba, 0.5, cost=0.0)
+    net = _signal_returns(fwd, idx, proba, 0.5, cost=0.001)
+    assert gross.sum() == 0.0                                    # без издержек — ноль
+    assert net.sum() < 0.0                                       # частый оборот съедает капитал
+
+
+def test_train_cost_bps_reduces_oos_sharpe(ohlcv):
+    """С издержками OOS-Sharpe не выше валового и cost_bps пишется в метрики."""
+    fs = build_feature_set(ohlcv, FeatureConfig(target_mode="triple_barrier", target_horizon=10))
+    gross = train(fs, TrainConfig(model_name="random_forest", n_splits=4, cost_bps=0.0))
+    net = train(fs, TrainConfig(model_name="random_forest", n_splits=4, cost_bps=10.0))
+    assert gross.metrics["cost_bps"] == 0.0 and net.metrics["cost_bps"] == 10.0
+    assert net.metrics["oos_sharpe"] <= gross.metrics["oos_sharpe"] + 1e-9
+
+
+# --- Temporal-safe калибровка (без утечки во времени) ---------------------- #
+def test_calibrated_training_extracts_importances(ohlcv):
+    """Калибровка через FrozenEstimator: модель обучается, важности достаются из базы."""
+    fs = build_feature_set(ohlcv, FeatureConfig(target_mode="triple_barrier", target_horizon=10))
+    mr = train(fs, TrainConfig(model_name="random_forest", n_splits=4, calibrate=True))
+    assert mr.calibrated
+    assert mr.importances                      # важности извлечены из базовой модели
+    assert len(mr.y_proba) == len(mr.test_index) > 0
+
+
+# --- CPCV (AFML гл. 12) ---------------------------------------------------- #
+def test_cpcv_splitter_paths_and_no_leakage():
+    """Число сочетаний/путей по формуле; train без пересечений и с purge-зазором."""
+    from math import comb
+
+    import numpy as np
+    import pandas as pd
+
+    from ml.cpcv import CombinatorialPurgedCV, make_groups
+
+    n, N, k, h, emb = 600, 6, 2, 5, 2
+    X = pd.DataFrame({"a": np.arange(n)})
+    cv = CombinatorialPurgedCV(n_groups=N, test_groups=k, horizon=h, embargo=emb)
+    assert cv.n_combos() == comb(N, k)
+    assert cv.n_paths() == comb(N - 1, k - 1)
+    groups = make_groups(n, N)
+    combos = list(cv.split(X))
+    assert len(combos) == comb(N, k)
+    gap = h + emb
+    for tr, te, combo in combos:
+        assert len(set(tr) & set(te)) == 0                      # train/test не пересекаются
+        tr_set = set(tr.tolist())
+        for g in combo:                                         # purge-зазор вокруг тест-блоков
+            s, e = groups[g]
+            assert not (tr_set & set(range(max(0, s - gap), min(n, e + gap))))
+
+
+def test_cpcv_assemble_paths_shapes():
+    """Сборка путей: P путей полной длины из предсказаний по группам."""
+    import numpy as np
+
+    from ml.cpcv import assemble_paths
+
+    preds = {0: [np.array([0.1, 0.2]), np.array([0.3, 0.4])],
+             1: [np.array([0.5]), np.array([0.6])],
+             2: [np.array([0.7, 0.8, 0.9]), np.array([0.1, 0.2, 0.3])]}
+    paths = assemble_paths(preds, n_groups=3)
+    assert len(paths) == 2
+    assert all(p.shape == (6,) for p in paths)                  # 2+1+3 баров на путь
+
+
+def test_cpcv_training_distribution(ohlcv):
+    """CPCV-обучение даёт распределение Sharpe по путям и единый OOS-ряд."""
+    import numpy as np
+
+    fs = build_feature_set(ohlcv, FeatureConfig(target_mode="triple_barrier", target_horizon=10))
+    mr = train(fs, TrainConfig(model_name="random_forest", validation="cpcv",
+                               n_splits=6, cpcv_k=2, cost_bps=2.0))
+    assert mr.validation == "cpcv"
+    n_paths = int(mr.metrics["cpcv_n_paths"])
+    assert n_paths > 0 and len(mr.cpcv_sharpes) == n_paths
+    for key in ("cpcv_sharpe_mean", "cpcv_sharpe_std", "cpcv_sharpe_min", "cpcv_prob_positive"):
+        assert key in mr.metrics
+    assert 0.0 <= mr.metrics["cpcv_prob_positive"] <= 1.0
+    assert len(mr.y_proba) == len(mr.test_index) > 0            # единый OOS-ряд для моста
+    assert np.isfinite(mr.metrics.get("oos_sharpe", float("nan")))
+
+
+def test_cpcv_bundle_roundtrip_preserves_sharpes(ohlcv, tmp_path):
+    fs = build_feature_set(ohlcv, FeatureConfig(target_mode="triple_barrier", target_horizon=10))
+    mr = train(fs, TrainConfig(model_name="random_forest", validation="cpcv",
+                               n_splits=6, cpcv_k=2))
+    bundle = build_bundle(mr, fs, ohlcv, source_path="synthetic.csv")
+    assert bundle.cpcv_sharpes == mr.cpcv_sharpes
+    path = save_bundle(bundle, tmp_path / "cpcv.joblib")
+    loaded = load_bundle(path)
+    assert loaded.cpcv_sharpes == mr.cpcv_sharpes
+
+
+# --- Реестр прогонов (гигиена селекционного смещения) ---------------------- #
+def test_registry_scans_and_groups_runs(ohlcv, tmp_path):
+    """scan_runs читает сводки, сортирует по Sharpe; группировка считает прогоны на данных."""
+    from ml.registry import scan_runs, selection_bias_by_data
+
+    fs = build_feature_set(ohlcv, FeatureConfig(target_mode="triple_barrier", target_horizon=10))
+    # Три прогона на ОДНИХ данных — модельный случай селекционного перебора.
+    for i in range(3):
+        mr = train(fs, TrainConfig(model_name="random_forest", n_splits=4))
+        bundle = build_bundle(mr, fs, ohlcv, source_path="synthetic.csv")
+        save_bundle(bundle, tmp_path / f"run_{i}.joblib")
+
+    rows = scan_runs(tmp_path)
+    assert len(rows) == 3
+    sharpes = [r.oos_sharpe for r in rows if r.oos_sharpe == r.oos_sharpe]
+    assert sharpes == sorted(sharpes, reverse=True)        # отсортировано по убыванию
+
+    bias = selection_bias_by_data(rows)
+    assert len(bias) == 1                                  # одни данные → одна группа
+    grp = next(iter(bias.values()))
+    assert grp.n_runs == 3                                 # все три прогона на этих данных
+
+
+def test_registry_ignores_broken_json(tmp_path):
+    """Битый/чужой json и отсутствие .joblib тихо пропускаются."""
+    from ml.registry import scan_runs
+
+    (tmp_path / "broken.json").write_text("{not valid", encoding="utf-8")
+    (tmp_path / "orphan.json").write_text('{"metrics": {}}', encoding="utf-8")  # нет .joblib
+    assert scan_runs(tmp_path) == []
+
+
 # --- Мета-разметка (AFML гл. 3) -------------------------------------------- #
 def test_meta_labeling_pipeline(ohlcv):
     import numpy as np
