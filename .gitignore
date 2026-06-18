@@ -19,6 +19,11 @@ data/
 # Локальные настройки инструментов
 .claude/settings.local.json
 
+# Ключи API бирж (на всякий случай; основное хранилище — вне репозитория,
+# в каталоге конфигурации пользователя ~/.config/main_python_algo/)
+.secrets/
+*credentials*.json
+
 # IDE
 .vscode/
 .idea/

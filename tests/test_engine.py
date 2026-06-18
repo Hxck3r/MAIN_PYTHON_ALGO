@@ -239,3 +239,19 @@ def test_stop_and_limit_mutually_exclusive():
 
     with pytest.raises(ValueError, match="взаимоисключающие"):
         BacktestEngine(data, BadOrder).run()
+
+
+def test_strategy_indicators_captured_for_chart():
+    """Линии, объявленные через plot_line() в init(), попадают в результат.
+
+    Это контракт оверлеев на графике: GUI рисует именно BacktestResult.indicators.
+    """
+    data = make_bars(FLAT * 5)  # 50 баров -- хватает на прогрев SMA(10)
+    result = BacktestEngine(
+        data, SmaCrossStrategy, {"fast_period": 5, "slow_period": 10}
+    ).run()
+    names = [ind["name"] for ind in result.indicators]
+    assert names == ["SMA 5", "SMA 10"]
+    fast = result.indicators[0]
+    assert fast["overlay"] is True
+    assert len(fast["values"]) == len(data)

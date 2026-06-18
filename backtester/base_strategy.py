@@ -102,6 +102,11 @@ class BaseStrategy(ABC):
         #: действующий набор параметров экземпляра
         self.p: dict[str, Any] = {**type(self).params, **param_overrides}
 
+        #: индикаторы для отрисовки на графике (заполняются в init() через
+        #: plot_line); подхватываются движком в BacktestResult.indicators и
+        #: live-движком -- и рисуются поверх свечей в GUI.
+        self._plots: list[dict[str, Any]] = []
+
         # Заполняются движком через _bind() перед запуском
         self._broker: Optional["Broker"] = None
         self._data: Optional[pd.DataFrame] = None
@@ -128,6 +133,40 @@ class BaseStrategy(ABC):
     @abstractmethod
     def next(self, bar: Bar) -> None:
         """Торговая логика; вызывается движком на каждом баре по порядку."""
+
+    # ------------------------------------------------------------------ #
+    # Отрисовка индикаторов на графике
+    # ------------------------------------------------------------------ #
+    def plot_line(
+        self,
+        name: str,
+        values: Any,
+        color: Optional[str] = None,
+        overlay: bool = True,
+        width: float = 1.5,
+    ) -> None:
+        """Объявить линию индикатора для отображения на графике.
+
+        Вызывается в init() рядом с уже посчитанным массивом -- математика не
+        дублируется. ``values`` -- массив длины len(data), выровненный по барам
+        (NaN на участке прогрева допустим, он просто не рисуется). ``overlay=True``
+        -- линия поверх свечей (скользящие, каналы); ``overlay=False`` -- в
+        отдельной панели (осцилляторы; пока не рисуется, зарезервировано).
+
+        Пример::
+
+            def init(self) -> None:
+                close = pd.Series(self.full_close)
+                self.fast = close.rolling(self.p["fast"]).mean().to_numpy()
+                self.plot_line("SMA fast", self.fast, color="#f5b041")
+        """
+        self._plots.append({
+            "name": str(name),
+            "values": np.asarray(values, dtype=float),
+            "color": color,
+            "overlay": bool(overlay),
+            "width": float(width),
+        })
 
     # ------------------------------------------------------------------ #
     # Привязка к движку (вызывается ядром, не пользователем)

@@ -35,6 +35,10 @@ class SmaCrossStrategy(BaseStrategy):
         self.fast_sma: np.ndarray = close.rolling(fast).mean().to_numpy()
         self.slow_sma: np.ndarray = close.rolling(slow).mean().to_numpy()
 
+        # Линии скользящих на графике (пересечения видны там, где входит бот)
+        self.plot_line(f"SMA {fast}", self.fast_sma, color="#f5b041")
+        self.plot_line(f"SMA {slow}", self.slow_sma, color="#5dade2")
+
     def next(self, bar: Bar) -> None:
         i = bar.index
         if i < 1 or np.isnan(self.slow_sma[i - 1]):

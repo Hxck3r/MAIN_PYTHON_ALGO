@@ -40,11 +40,20 @@ else:
     STRATEGIES["ML мета-модель (López de Prado)"] = MetaLabelStrategy
     __all__.append("MetaLabelStrategy")
 
-# ... существующие импорты ...
-
+# TA Adaptive Trend Lite -- сигнальная (быстрое numba-ядро); регистрируется
+# только при установленной numba (как и прочие SignalStrategy выше).
 try:
     from .adaptive_trend_lite import TAAdaptiveTrendLite
 except ImportError:
     pass
 else:
     STRATEGIES["TA Adaptive Trend Lite (быстрый, numba)"] = TAAdaptiveTrendLite
+    __all__.append("TAAdaptiveTrendLite")
+
+# TA Adaptive Trend (ATR + частичные закрытия) -- событийная стратегия,
+# работает без numba. Регистрируем ДОБАВЛЕНИЕМ ключа, а не переприсваиванием
+# STRATEGIES (иначе стёрли бы все стратегии, добавленные выше).
+from .adaptive_trend_atr import TAAdaptiveTrendATR  # noqa: E402
+
+STRATEGIES["TA Adaptive Trend (ATR + Частичные закрытия)"] = TAAdaptiveTrendATR
+__all__.append("TAAdaptiveTrendATR")

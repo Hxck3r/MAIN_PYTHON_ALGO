@@ -29,6 +29,12 @@ ml = [
     "lightgbm>=4.0",
     "joblib>=1.3",
 ]
+# Live-торговля на криптобиржах (пакет live/, окно «Торговля»). Опционально:
+# приложение и тестер запускаются без ccxt, окно торговли тогда показывает
+# подсказку по установке. ccxt даёт единый API к BingX / MEXC / Binance.
+live = [
+    "ccxt>=4.0",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
@@ -36,6 +42,7 @@ dev = [
     "scikit-learn>=1.3",
     "lightgbm>=4.0",
     "joblib>=1.3",
+    "ccxt>=4.0",
 ]
 
 # Запуск десктопного приложения: `algo-desktop` (после `pip install -e .`).
@@ -48,7 +55,7 @@ algo-desktop = "desktop_app:main"
 # tests/ и dev-скрипты (main/sanity_check/gui_smoke_test) в пакет не входят:
 # тесты импортируют их из дерева исходников через pytest pythonpath = ["."].
 [tool.setuptools]
-packages = ["backtester", "gui", "ml", "ml.features", "strategies"]
+packages = ["backtester", "gui", "live", "ml", "ml.features", "strategies"]
 py-modules = ["desktop_app"]
 
 [tool.pytest.ini_options]

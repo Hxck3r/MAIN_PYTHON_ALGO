@@ -517,4 +517,5 @@ def run_fast_backtest(
         initial_cash=float(cash),
         strategy_name=strategy_cls.__name__,
         strategy_params=dict(strategy.p),
+        indicators=list(getattr(strategy, "_plots", [])),
     )

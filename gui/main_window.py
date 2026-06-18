@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         # если пользователь после оптимизации сменил период/стратегию в GUI.
         self._last_opt_context: Optional[dict[str, Any]] = None
         self._task_started: Optional[float] = None       # старт расчёта (для ETA)
+        self._trading_window: Optional[Any] = None        # окно live-торговли
 
         self._build_ui()
         self._on_strategy_changed()
@@ -360,6 +361,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_mc)
         layout.addWidget(self.btn_pbo)
         layout.addWidget(self.btn_stop)
+
+        # --- Реальная/демо торговля (отдельное окно) ------------------------#
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color: #333;")
+        layout.addWidget(line)
+        self.btn_trade = QPushButton("🟢  Торговля (демо / реал)…")
+        self.btn_trade.setToolTip(
+            "Открыть отдельное окно live-торговли на бирже (BingX / MEXC / Binance).\n"
+            "Текущая стратегия и её параметры переносятся туда автоматически."
+        )
+        self.btn_trade.clicked.connect(self._open_trading_window)
+        layout.addWidget(self.btn_trade)
         layout.addStretch(1)
         return panel
 
@@ -1419,6 +1433,37 @@ class MainWindow(QMainWindow):
                 color = "#ff5c5c"
         self.lbl_grid.setText(text)
         self.lbl_grid.setStyleSheet(f"color: {color}; padding: 2px 6px;")
+
+    # ================================================================== #
+    # Окно live-торговли
+    # ================================================================== #
+    def _open_trading_window(self) -> None:
+        """Открывает (или поднимает) отдельное окно торговли, перенося в него
+        текущую стратегию тестера и её параметры из таблицы «Параметры»."""
+        # Параметры берём из таблицы; если они невалидны — переносим только
+        # стратегию (значения по умолчанию подставит сама таблица в окне торговли).
+        try:
+            params = self.param_table.fixed_values()
+        except ValueError:
+            params = None
+
+        if self._trading_window is not None:
+            self._trading_window.show()
+            self._trading_window.raise_()
+            self._trading_window.activateWindow()
+            return
+
+        from .trading_window import TradingWindow
+
+        self._trading_window = TradingWindow(
+            parent=self,
+            initial_strategy=self.combo_strategy.currentText(),
+            initial_params=params,
+        )
+        # Несвязанное окно (Qt.Window), чтобы было самостоятельным и не модальным
+        self._trading_window.setWindowFlag(Qt.Window, True)
+        self._trading_window.show()
+        self._log("Открыто окно торговли (демо/реал)")
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(f"[{datetime.now():%H:%M:%S}] {message}")

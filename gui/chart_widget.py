@@ -65,6 +65,9 @@ COLOR_EQUITY = "#ffffff"
 COLOR_START_CASH = "#888888"
 COLOR_GRID = "#ffffff"
 
+# Палитра для индикаторов без явного цвета (циклически по порядку объявления)
+INDICATOR_PALETTE = ("#f5b041", "#5dade2", "#bb8fce", "#48c9b0", "#ec7063", "#f7dc6f")
+
 
 def make_grid_item() -> pg.GridItem:
     """Пунктирная сетка; полупрозрачность GridItem выставляет сам (alpha<=50)."""
@@ -114,21 +117,28 @@ class ChartWidget(QWidget):
             ax.reset()                     # удаляет и сетку --
             ax.addItem(make_grid_item())   # возвращаем её на место
 
-    def show_data(self, df: pd.DataFrame) -> None:
-        """Только свечи (после загрузки данных, до бэктеста)."""
+    def show_data(self, df: pd.DataFrame, indicators=None) -> None:
+        """Свечи и (опционально) оверлеи индикаторов.
+
+        indicators -- список dict(name, [values | series], color, overlay, width),
+        как в BacktestResult.indicators или в событии «indicators» live-движка.
+        """
         self.clear()
         fplt.candlestick_ochl(
             df[["open", "close", "high", "low"]], ax=self.ax_price
         )
+        self._plot_overlays(df, indicators)
         fplt.refresh()
 
     def show_result(self, result: BacktestResult) -> None:
-        """Свечи + маркеры сделок + связки вход-выход + эквити."""
+        """Свечи + индикаторы + маркеры сделок + связки вход-выход + эквити."""
         self.clear()
         df = result.data
         fplt.candlestick_ochl(
             df[["open", "close", "high", "low"]], ax=self.ax_price
         )
+        # Оверлеи индикаторов рисуем сразу после свечей -- маркеры сделок лягут поверх
+        self._plot_overlays(df, getattr(result, "indicators", None))
 
         trades = result.trades_df()
         if not trades.empty:
@@ -152,6 +162,36 @@ class ChartWidget(QWidget):
         fplt.refresh()
 
     # ------------------------------------------------------------------ #
+    def _plot_overlays(self, df: pd.DataFrame, indicators) -> None:
+        """Накладывает линии-индикаторы (overlay=True) поверх цены.
+
+        Каждый индикатор -- dict с готовой ``series`` (pd.Series с DatetimeIndex)
+        либо с массивом ``values`` длины len(df) (выравнивается по df.index).
+        NaN-участки прогрева отбрасываются, чтобы линия начиналась с данных.
+        Осцилляторы (overlay=False) пока пропускаются (отдельная панель -- TODO).
+        """
+        if not indicators:
+            return
+        for i, ind in enumerate(indicators):
+            if not ind.get("overlay", True):
+                continue
+            series = ind.get("series")
+            if series is None:
+                values = np.asarray(ind["values"], dtype=float)
+                n = min(len(values), len(df.index))
+                series = pd.Series(values[:n], index=df.index[:n])
+            series = series.dropna()
+            if series.empty:
+                continue
+            color = ind.get("color") or INDICATOR_PALETTE[i % len(INDICATOR_PALETTE)]
+            fplt.plot(
+                series,
+                ax=self.ax_price,
+                color=color,
+                legend=ind.get("name", f"ind {i + 1}"),
+                width=ind.get("width", 1.5),
+            )
+
     def _bar_series(
         self, df: pd.DataFrame, bars: pd.Series, prices: pd.Series
     ) -> pd.Series:

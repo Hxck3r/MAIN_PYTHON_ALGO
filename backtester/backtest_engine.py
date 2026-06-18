@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional, Type
 
@@ -569,6 +569,11 @@ class BacktestResult:
     initial_cash: float
     strategy_name: str
     strategy_params: dict[str, Any]
+    #: индикаторы для графика (см. BaseStrategy.plot_line); каждый элемент --
+    #: dict(name, values, color, overlay, width). Пусто, если стратегия их не
+    #: объявляет. default_factory -- чтобы старый код, строящий BacktestResult
+    #: без этого поля, не падал.
+    indicators: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def final_equity(self) -> float:
@@ -732,6 +737,7 @@ class BacktestEngine:
             initial_cash=broker.initial_cash,
             strategy_name=self.strategy_cls.__name__,
             strategy_params=dict(strategy.p),
+            indicators=list(getattr(strategy, "_plots", [])),
         )
 
 
