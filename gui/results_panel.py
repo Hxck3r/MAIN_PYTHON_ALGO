@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
 
 from backtester import BacktestResult, OptimizationResult
@@ -41,6 +42,70 @@ METRIC_LABELS: dict[str, str] = {
     "complex_criterion": "Комплексный критерий",
 }
 
+# Направление «лучше»: для каких метрик РОСТ значения — это ухудшение
+# (просадка, волатильность, серии убытков, комиссии). Для остальных по
+# умолчанию рост = улучшение. Перечисленные в NEUTRAL метрики не красятся:
+# для них «лучше/хуже» не определено (стартовый капитал, число сделок и т. п.).
+LOWER_IS_BETTER: frozenset[str] = frozenset({
+    "max_drawdown",
+    "max_drawdown_pct",
+    "max_drawdown_duration",
+    "annualized_volatility_pct",
+    "max_consecutive_losses",
+    "total_commission",
+})
+NEUTRAL_METRICS: frozenset[str] = frozenset({
+    "initial_equity",
+    "total_trades",
+    "avg_trade_duration_bars",
+    "exposure_pct",
+})
+
+# Цвета колонки сравнения (тон в тон с тёмной темой графиков).
+_COLOR_BETTER = QColor("#16c784")
+_COLOR_WORSE = QColor("#ff4d4d")
+_COLOR_NEUTRAL = QColor("#9e9e9e")
+
+
+def _delta_item(key: str, current: Any, previous: Any) -> QTableWidgetItem:
+    """Ячейка «насколько метрика изменилась к прошлому бэктесту».
+
+    Показывает относительное изменение в процентах со стрелкой и красит
+    его зелёным/красным в зависимости от того, улучшение это или ухудшение
+    (с учётом направления метрики), серым — для нейтральных метрик.
+    """
+    item = QTableWidgetItem()
+    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+    if not isinstance(current, (int, float)) or not isinstance(previous, (int, float)):
+        return item
+    if isinstance(current, float) and (math.isnan(current) or math.isinf(current)):
+        return item
+    if isinstance(previous, float) and (math.isnan(previous) or math.isinf(previous)):
+        return item
+
+    diff = float(current) - float(previous)
+    if abs(diff) < 1e-12:
+        item.setText("= 0%")
+        item.setForeground(QBrush(_COLOR_NEUTRAL))
+        return item
+
+    if abs(previous) > 1e-12:
+        pct = diff / abs(float(previous)) * 100.0
+        text = f"{'▲' if diff > 0 else '▼'} {pct:+,.2f}%"
+    else:
+        # Прошлое значение было нулём — процент не определён, показываем дельту.
+        text = f"{'▲' if diff > 0 else '▼'} {diff:+,.4f}".rstrip("0").rstrip(".")
+    item.setText(text)
+
+    if key in NEUTRAL_METRICS:
+        item.setForeground(QBrush(_COLOR_NEUTRAL))
+    else:
+        improved = (diff < 0) if key in LOWER_IS_BETTER else (diff > 0)
+        item.setForeground(QBrush(_COLOR_BETTER if improved else _COLOR_WORSE))
+    return item
+
 
 def _num_item(value: Any) -> QTableWidgetItem:
     """Ячейка с числом: красивый текст + корректная числовая сортировка."""
@@ -61,17 +126,28 @@ def _num_item(value: Any) -> QTableWidgetItem:
 
 
 class MetricsTable(QTableWidget):
-    """Двухколоночная таблица «метрика -- значение»."""
+    """Таблица «метрика -- значение -- изменение к прошлому бэктесту».
+
+    Третья колонка автоматически сравнивает каждую метрику с предыдущим
+    показанным прогоном: видно, что улучшилось, а что просело после смены
+    параметров — без скриншотов и запоминания чисел.
+    """
 
     def __init__(self, parent=None) -> None:
-        super().__init__(0, 2, parent)
-        self.setHorizontalHeaderLabels(["Метрика", "Значение"])
+        super().__init__(0, 3, parent)
+        self.setHorizontalHeaderLabels(["Метрика", "Значение", "Δ к прошлому"])
         self.horizontalHeader().setStretchLastSection(True)
         self.verticalHeader().setVisible(False)
         self.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._prev_stats: dict[str, Any] | None = None
+
+    def reset_baseline(self) -> None:
+        """Забыть прошлый прогон (следующий бэктест покажется без сравнения)."""
+        self._prev_stats = None
 
     def show_result(self, result: BacktestResult) -> None:
         stats = result.stats().to_dict()
+        prev = self._prev_stats
         self.setRowCount(len(stats))
         for row, (key, value) in enumerate(stats.items()):
             label = METRIC_LABELS.get(key, key)
@@ -79,7 +155,12 @@ class MetricsTable(QTableWidget):
             name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.setItem(row, 0, name_item)
             self.setItem(row, 1, _num_item(value))
+            if prev is not None and key in prev:
+                self.setItem(row, 2, _delta_item(key, value, prev[key]))
+            else:
+                self.setItem(row, 2, QTableWidgetItem())
         self.resizeColumnsToContents()
+        self._prev_stats = stats
 
 
 class TradesTable(QTableWidget):

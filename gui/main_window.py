@@ -65,6 +65,7 @@ from .ml_panel import MlPanel
 from .opt_charts import OptimizationChartsPanel
 from .pbo_panel import PboPanel
 from .param_table import ParamTable
+from .result_charts import ResultChartsPanel
 from .results_panel import MetricsTable, OptimizationTable, TradesTable
 from .wfa_matrix_panel import WfaMatrixPanel
 from .wfa_panel import WfaPanel
@@ -377,8 +378,17 @@ class MainWindow(QMainWindow):
         param_layout.addWidget(self.lbl_grid)
         self.tabs.addTab(param_widget, "Параметры")
 
+        # Вкладка «Результаты»: слева таблица метрик (с колонкой сравнения
+        # к прошлому прогону), справа диаграммы этого же бэктеста.
         self.metrics_table = MetricsTable()
-        self.tabs.addTab(self.metrics_table, "Результаты")
+        self.result_charts = ResultChartsPanel()
+        results_split = QSplitter(Qt.Horizontal)
+        results_split.addWidget(self.metrics_table)
+        results_split.addWidget(self.result_charts)
+        results_split.setStretchFactor(0, 2)
+        results_split.setStretchFactor(1, 3)
+        self.results_tab = results_split
+        self.tabs.addTab(self.results_tab, "Результаты")
 
         self.trades_table = TradesTable()
         self.tabs.addTab(self.trades_table, "Сделки")
@@ -1281,9 +1291,10 @@ class MainWindow(QMainWindow):
         self._last_result = result
         stats = result.stats()
         self.metrics_table.show_result(result)
+        self.result_charts.show_result(result)
         self.trades_table.show_result(result)
         self.chart.show_result(result)
-        self.tabs.setCurrentWidget(self.metrics_table)
+        self.tabs.setCurrentWidget(self.results_tab)
         self._log(
             f"Бэктест завершён: прибыль {stats.net_profit:,.2f} "
             f"({stats.total_return_pct:.2f}%), сделок {stats.total_trades}, "
