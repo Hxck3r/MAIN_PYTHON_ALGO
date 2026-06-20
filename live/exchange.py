@@ -427,19 +427,77 @@ class ExchangeClient:
             )
         return None
 
+    @staticmethod
+    def _is_benign(exc: Exception) -> bool:
+        """True для «безобидных» отказов биржи: значение уже выставлено / не нужно.
+
+        Биржи часто отвечают ошибкой, когда плечо/режим/позиционный режим уже
+        такие, как просим (Binance: -4046 «no need to change leverage», -4059
+        «no need to change position side» и т.п.) -- это не повод тревожить
+        пользователя. Также сюда попадает NotSupported (например, у DEX, где
+        концепции hedge-режима нет).
+        """
+        if ccxt is not None and isinstance(exc, getattr(ccxt, "NotSupported", ())):
+            return True
+        s = str(exc).lower()
+        benign = (
+            "no need", "not modified", "no change", "cannot be changed",
+            "-4046", "-4059", "already", "unchanged",
+        )
+        return any(b in s for b in benign)
+
     def set_leverage(
         self, leverage: int, symbol: str, margin_mode: Optional[str] = None
-    ) -> None:
-        """Best-effort: выставить плечо и режим маржи. Ошибки не критичны."""
+    ) -> list[str]:
+        """Best-effort: выставить плечо и режим маржи.
+
+        Возвращает список предупреждений (пустой, если всё ок). Тихий провал
+        опасен: торговля шла бы на ДЕФОЛТНОМ плече/режиме аккаунта, что меняет
+        требования к марже и риск ликвидации. Поэтому о реальных сбоях сообщаем
+        наверх (движок выводит их в журнал), но торговлю не блокируем.
+        """
+        warnings: list[str] = []
         if margin_mode:
             try:
                 self.ex.set_margin_mode(margin_mode, symbol)
-            except Exception:  # noqa: BLE001 - часть бирж не поддерживает/уже выставлено
-                pass
+            except Exception as exc:  # noqa: BLE001
+                if not self._is_benign(exc):
+                    warnings.append(
+                        f"Не удалось выставить режим маржи «{margin_mode}» для "
+                        f"{symbol}: {exc}. Торгую на текущем режиме аккаунта — "
+                        f"проверьте его вручную."
+                    )
         try:
             self.ex.set_leverage(leverage, symbol)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            if not self._is_benign(exc):
+                warnings.append(
+                    f"Не удалось выставить плечо x{leverage} для {symbol}: {exc}. "
+                    f"Торгую на ТЕКУЩЕМ плече аккаунта — проверьте его вручную, "
+                    f"иначе риск/маржа будут не те."
+                )
+        return warnings
+
+    def ensure_one_way(self, symbol: Optional[str] = None) -> list[str]:
+        """Best-effort перевод аккаунта в One-way (нетто) режим позиций.
+
+        Вся логика брокера рассчитана на one-way: разворот через ноль, reduceOnly
+        закрытие, единственная позиция по символу. В Hedge-режиме это сломалось бы.
+        Многие площадки (в т.ч. DEX Lighter) one-way по умолчанию / не знают про
+        hedge -- такой отказ безобиден и проглатывается. Возвращает список
+        предупреждений (непустой только при настоящей проблеме).
+        """
+        try:
+            self.ex.set_position_mode(False, symbol)  # hedged=False -> one-way
+            return []
+        except Exception as exc:  # noqa: BLE001
+            if self._is_benign(exc):
+                return []
+            return [
+                f"Не удалось подтвердить One-way (нетто) режим: {exc}. "
+                f"Логика торговли рассчитана на one-way — убедитесь, что "
+                f"Hedge-режим на аккаунте ВЫКЛЮЧЕН, иначе учёт позиции разойдётся."
+            ]
 
     # ------------------------------------------------------------------ #
     # Рыночные данные

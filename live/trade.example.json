@@ -1,0 +1,27 @@
+{
+  "exchange": "lighter",
+  "mode": "demo",
+  "symbol": "BTC/USDC:USDC",
+  "timeframe": "1h",
+  "strategy": "SMA Crossover (пересечение скользящих)",
+  "strategy_params": { "fast_period": 10, "slow_period": 30 },
+  "leverage": 5,
+  "margin_mode": "isolated",
+  "window_bars": 800,
+  "poll_seconds": 10,
+  "dry_run": false,
+  "sizing": { "mode": "notional", "notional_usdt": 100 },
+  "execution": {
+    "entry_limit": false,
+    "post_only": true,
+    "limit_offset_bps": 1.0,
+    "tp_maker": false,
+    "max_slippage_pct": 0.3,
+    "require_protective": true
+  },
+  "risk": {
+    "max_notional_per_order": 500,
+    "max_orders_per_hour": 10,
+    "max_daily_loss_pct": 5
+  }
+}

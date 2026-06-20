@@ -8,7 +8,13 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from live.broker import ExecutionConfig, LiveBroker, RiskLimits, SizingConfig
+from live.broker import (
+    ExecutionConfig,
+    LiveBroker,
+    ProtectiveOrderError,
+    RiskLimits,
+    SizingConfig,
+)
 from live.exchange import LivePosition, drop_forming_candle
 
 
@@ -24,6 +30,8 @@ class FakeExchange:
         self.net = 0.0                         # signed contracts
         self.reject = False                    # рыночный ордер -> отказ биржи
         self.ticker = 100.0                    # текущая цена (для проверки проскальзывания)
+        self.fill_ratio = 1.0                  # доля заливки рыночного ордера (частичный филл)
+        self.fail_stop_kinds: set[str] = set() # виды стоп-ордеров, которые «отклоняет» биржа
 
     def contract_size(self, symbol: str) -> float:
         return 1.0
@@ -41,8 +49,9 @@ class FakeExchange:
         if self.reject:
             raise RuntimeError("биржа отклонила ордер")
         self.orders.append((side, amount, reduce_only))
-        self.net += amount if side == "buy" else -amount
-        return {"id": len(self.orders), "average": 100.0}
+        filled = amount * self.fill_ratio
+        self.net += filled if side == "buy" else -filled
+        return {"id": len(self.orders), "average": 100.0, "filled": filled}
 
     def create_limit_order(self, symbol, side, amount, price,
                            reduce_only=False, post_only=False, params=None):
@@ -51,6 +60,8 @@ class FakeExchange:
         return {"id": f"lim{len(self.limit_orders)}"}
 
     def create_stop_order(self, symbol, side, amount, stop_price, kind="stop"):
+        if kind in self.fail_stop_kinds:
+            raise RuntimeError(f"биржа отклонила {kind}")
         self.stops.append((side, amount, stop_price, kind))
         return {"id": "stop"}
 
@@ -395,6 +406,63 @@ def test_snapshot_restore_pending_limit_entry():
     assert fresh._pending_entry is not None
     assert fresh._pending_entry["side"].name == "BUY"
     assert fresh._pending_entry["sl"] == 95.0
+
+
+# --------------------------------------------------------------------------- #
+# Защита позиции: без стоп-лосса не торгуем (особенно важно для DEX)
+# --------------------------------------------------------------------------- #
+def test_protective_sl_failure_raises_and_blocks_naked():
+    # биржа отклонила стоп -> позиция осталась бы голой -> критическая ошибка
+    ex, broker, _ = _new_broker()
+    ex.fail_stop_kinds = {"stop"}
+    _begin(broker, price=100.0)
+    broker.buy(stop_loss=95.0)
+    with pytest.raises(ProtectiveOrderError):
+        broker.sync_protective_orders()
+
+
+def test_protective_naked_allowed_when_flag_off():
+    # require_protective=False -> не бросаем, но громко предупреждаем
+    ex, broker, events = _new_broker(
+        execution=ExecutionConfig(require_protective=False)
+    )
+    ex.fail_stop_kinds = {"stop"}
+    _begin(broker, price=100.0)
+    broker.buy(stop_loss=95.0)
+    broker.sync_protective_orders()                  # не бросает
+    assert any(kind == "error" for kind, _ in events)
+
+
+def test_protective_invalid_sl_side_is_critical():
+    # лонг со стопом ВЫШЕ входа -- неверная сторона -> критично (не выставляем мусор)
+    ex, broker, _ = _new_broker()
+    _begin(broker, price=100.0)
+    broker.buy(stop_loss=105.0)                       # вход ~100, стоп выше -- неверно
+    with pytest.raises(ProtectiveOrderError):
+        broker.sync_protective_orders()
+    assert ex.stops == []                             # битый стоп на биржу не ушёл
+
+
+def test_protective_tp_failure_is_non_critical():
+    # стоп встал, тейк отклонён -> торговля продолжается (TP не критичен)
+    ex, broker, events = _new_broker()
+    ex.fail_stop_kinds = {"take_profit"}
+    _begin(broker, price=100.0)
+    broker.buy(stop_loss=95.0, take_profit=110.0)
+    broker.sync_protective_orders()                  # не бросает
+    assert ("sell", 95.0, "stop") in [(s[0], s[2], s[3]) for s in ex.stops]
+    assert any(kind == "error" and "ейк" in msg for kind, msg in events)
+
+
+def test_partial_fill_updates_model_by_filled_amount():
+    # рыночный ордер залился наполовину -> локальная модель = фактический объём
+    ex, broker, _ = _new_broker()
+    ex.fill_ratio = 0.5
+    _begin(broker, price=100.0)
+    broker.buy(size=1.0)                              # запрос 1.0, залилось 0.5
+    assert ex.orders[-1] == ("buy", 1.0, False)       # на биржу ушёл запрошенный объём
+    assert broker.position is not None
+    assert broker.position.size == pytest.approx(0.5)  # но в модели -- фактический филл
 
 
 # --------------------------------------------------------------------------- #

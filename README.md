@@ -440,6 +440,67 @@ live-торговли на бирже **Binance** (CEX) или **Lighter** (DEX)
 > тестнет (ключи и индексы основной сети там не работают). Биржевые стоп/тейк-
 > ордера у DEX через ccxt могут поддерживаться ограниченно.
 
+## Headless-торговля на VPS (`algo-live`) и уведомления
+
+Для автономной работы на сервере без графики есть консольный раннер
+[`live/runner.py`](live/runner.py) — он запускает **тот же** движок
+([`live.engine`](live/engine.py)), что и окно «Торговля», но управляется
+JSON-конфигом, пишет журнал в `stdout` (его подхватывает `journald`), корректно
+останавливается по `SIGINT`/`SIGTERM` и переживает рестарты (состояние сессии —
+SL/TP, базис дневного убытка — сохраняется в `~/.config/main_python_algo/`).
+
+```bash
+pip install -e ".[live]"                       # ставит ccxt
+cp live/trade.example.json ~/trade.json        # отредактируйте под себя
+algo-live --config ~/trade.json --dry-run      # 1) сухой прогон (без ордеров)
+algo-live --config ~/trade.json --yes          # 2) реальная торговля (осознанно)
+```
+
+**Конфиг** ([`live/trade.example.json`](live/trade.example.json)) — биржа, режим
+(`demo`/`real`), символ, таймфрейм, стратегия (имя из реестра или имя класса) и её
+параметры, плечо, sizing/execution/risk. Поле `execution.require_protective`
+(по умолчанию `true`) важно для **Lighter**: если биржевой **стоп-лосс не встал**,
+раннер аварийно закроет позицию и остановится, а не оставит её без защиты.
+
+**Ключи в конфиг НЕ кладутся** (секреты не на диске в открытом виде). Раннер берёт
+их так:
+1. из переменных окружения `ALGO_CRED_<ПОЛЕ>` в верхнем регистре, например
+   `ALGO_CRED_PRIVATE_KEY`, `ALGO_CRED_ACCOUNT_INDEX`, `ALGO_CRED_API_KEY_INDEX`
+   (для CEX — `ALGO_CRED_API_KEY`, `ALGO_CRED_SECRET`) — удобно для systemd
+   `EnvironmentFile`;
+2. иначе из общего хранилища ключей, которое заполняет GUI.
+
+**Безопасность реала:** при `mode:"real"` без `dry_run` старт требует явного
+подтверждения — флаг `--yes` (для неинтерактивного systemd) либо ответ в терминале.
+Без подтверждения торговля реальными деньгами не начнётся. Коды возврата для
+`Restart=` в systemd: `0` — чистый стоп, `1` — сбой цикла, `2` — ошибка конфига,
+`3` — нет подтверждения реала, `4` — ошибка подключения.
+
+**Уведомления в Telegram** (опционально, без сторонних зависимостей) включаются
+двумя переменными окружения — раннер шлёт в чат старт/стоп, ошибки и все
+**фатальные/риск-события** (рубильник дневного убытка, невозможность защитить
+позицию), чтобы вы узнали о них, не глядя в журнал:
+
+```bash
+export TELEGRAM_BOT_TOKEN=123456:ABC...     # токен бота от @BotFather
+export TELEGRAM_CHAT_ID=987654321           # ваш chat_id
+```
+
+**systemd:** готовый юнит — [`live/algo-live.service.example`](live/algo-live.service.example)
+(`Restart=always`, `EnvironmentFile`, остановка по `SIGTERM`). Кратко:
+
+```bash
+sudo cp live/algo-live.service.example /etc/systemd/system/algo-live.service
+sudoedit /etc/systemd/system/algo-live.service   # пути, User, --config
+sudoedit /etc/algo-live.env                       # секреты (права 0600)
+sudo systemctl daemon-reload && sudo systemctl enable --now algo-live
+journalctl -u algo-live -f                         # живой журнал
+```
+
+> Сначала обкатайте конфиг на **демо/тестнете** и в `--dry-run`, и лишь затем
+> переходите на реал малым размером. Для Lighter помните: демо — отдельный тестнет
+> с отдельными ключами.
+
 ## Дорожная карта
 
 Архитектура рассчитана на расширение без переписывания ядра.
@@ -451,6 +512,8 @@ live-торговли на бирже **Binance** (CEX) или **Lighter** (DEX)
   смещения) — `ml/registry.py`.
 - ✅ ML «из коробки» уровня AFML: тройной барьер, мета-лейблинг, fracdiff, веса
   уникальности, purged walk-forward + CPCV, честный OOS с издержками — пакет `ml/`.
+- ✅ Headless-раннер live-торговли для VPS (`algo-live`) — JSON-конфиг, ключи из
+  env/хранилища, Telegram-уведомления, systemd, корректная остановка по сигналам.
 
 **В планах:**
 

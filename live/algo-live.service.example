@@ -1,0 +1,35 @@
+# Пример systemd-юнита для headless live-торговли (algo-live).
+# Установка:
+#   1) sudo cp live/algo-live.service.example /etc/systemd/system/algo-live.service
+#   2) отредактируйте пути (WorkingDirectory/ExecStart) и User под себя
+#   3) положите ключи: либо один раз заполните их в GUI, либо в EnvironmentFile ниже
+#   4) sudo systemctl daemon-reload && sudo systemctl enable --now algo-live
+#   5) журнал: journalctl -u algo-live -f
+#
+# Секреты лучше держать вне репозитория -- в /etc/algo-live.env с правами 0600:
+#   ALGO_CRED_PRIVATE_KEY=...
+#   ALGO_CRED_ACCOUNT_INDEX=0
+#   ALGO_CRED_API_KEY_INDEX=4
+#   TELEGRAM_BOT_TOKEN=...        # опционально, для алертов
+#   TELEGRAM_CHAT_ID=...
+
+[Unit]
+Description=algo-live headless trading
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/home/trader/MAIN_PYTHON_ALGO
+EnvironmentFile=-/etc/algo-live.env
+# --yes обязателен для неинтерактивного запуска РЕАЛА (осознанное подтверждение).
+ExecStart=/home/trader/MAIN_PYTHON_ALGO/.venv/bin/algo-live --config /home/trader/trade.json --yes
+Restart=always
+RestartSec=10
+# Гасим по SIGTERM -- движок ловит его и выходит из цикла на ближайшем тике.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

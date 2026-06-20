@@ -36,6 +36,18 @@ from .exchange import ExchangeClient, LivePosition
 EmitFn = Callable[[str, str, Optional[dict]], None]
 
 
+class ProtectiveOrderError(RuntimeError):
+    """Не удалось защитить живую позицию стоп-лоссом.
+
+    Поднимается из sync_protective_orders, когда у ОТКРЫТОЙ позиции есть
+    желаемый стоп-лосс, но биржа его не приняла (или уровень на неверной
+    стороне). Движок ловит это отдельно от ExchangeError и аварийно закрывает
+    позицию: торговать без стопа на реале (особенно на DEX, где биржевые
+    стоп-ордера поддерживаются ограниченно) опаснее, чем выйти в кэш.
+    Отключается флагом ExecutionConfig.require_protective=False.
+    """
+
+
 @dataclass
 class ExecutionConfig:
     """Как исполнять входы и защитные выходы (для экономии на комиссии).
@@ -54,6 +66,12 @@ class ExecutionConfig:
         Если к моменту исполнения цена ушла ПРОТИВ входа дальше этого процента
         от цены закрытия бара, ордер не выставляется (вход пропускается).
         0 -- проверка выключена. Закрытия и защитные ордера не блокируются.
+    require_protective -- если стратегия задала стоп-лосс, но биржа его не
+        приняла, аварийно закрыть позицию и остановить цикл (см.
+        ProtectiveOrderError). True по умолчанию -- безопасно для реала и DEX,
+        где биржевые стопы поддерживаются ограниченно. False оставляет позицию
+        под управлением стратегии (выход по сигналу на закрытии бара) -- ставьте
+        осознанно, только если стратегия не полагается на биржевой стоп.
     """
 
     entry_limit: bool = False
@@ -61,6 +79,7 @@ class ExecutionConfig:
     limit_offset_bps: float = 1.0
     tp_maker: bool = False
     max_slippage_pct: float = 0.0
+    require_protective: bool = True
 
 
 @dataclass
@@ -262,7 +281,8 @@ class LiveBroker:
         if order is None:
             return  # биржа отклонила -- позиция как была, фантомного филла не делаем
         fill = self._fill_price(order)
-        self._apply_fill(OrderSide.SELL if lp.is_long else OrderSide.BUY, lp.size,
+        closed_amt = self._order_filled(order, lp.size)
+        self._apply_fill(OrderSide.SELL if lp.is_long else OrderSide.BUY, closed_amt,
                          sl=None, tp=None, reduce=True, fill_price=fill)
 
     def cancel_all_orders(self) -> None:
@@ -311,7 +331,8 @@ class LiveBroker:
             return  # биржа отклонила -- фантомного филла не делаем (фикс №2)
         self._register_entry_order()
         self._apply_fill(
-            side, contracts, sl=stop_loss, tp=take_profit, reduce=False,
+            side, self._order_filled(order, contracts),
+            sl=stop_loss, tp=take_profit, reduce=False,
             fill_price=self._fill_price(order),
         )
 
@@ -503,6 +524,27 @@ class LiveBroker:
                                  "contracts": contracts})
         return order
 
+    @staticmethod
+    def _order_filled(order: Optional[dict], requested: float) -> float:
+        """Фактически залитый объём из ответа биржи (фолбэк -- запрошенный).
+
+        При частичном филле рыночного ордера биржа возвращает `filled` < запроса;
+        учитываем именно его, чтобы локальная модель позиции не разошлась с биржей
+        (на следующем баре истина всё равно перечитывается, но в пределах бара
+        стратегия может довыставлять ордера). Если поля нет/пустое -- считаем
+        ордер залитым полностью (как и было).
+        """
+        if order:
+            val = order.get("filled")
+            if val is not None:
+                try:
+                    f = float(val)
+                    if f > 0:
+                        return f
+                except (TypeError, ValueError):
+                    pass
+        return requested
+
     def _fill_price(self, order: Optional[dict]) -> float:
         """Фактическая средняя цена филла из ответа биржи (фолбэк -- last_price)."""
         if order:
@@ -572,8 +614,32 @@ class LiveBroker:
     # ------------------------------------------------------------------ #
     # Защитные ордера (SL/TP) -- синхронизируются движком после next()
     # ------------------------------------------------------------------ #
+    def _protective_ref(self, lp: LivePosition) -> Optional[float]:
+        """Опорная цена для проверки стороны SL/TP (вход позиции; фолбэк -- last)."""
+        ref = lp.entry_price if lp.entry_price and lp.entry_price > 0 else self._last_price
+        return ref if math.isfinite(ref) and ref > 0 else None
+
+    def _level_on_correct_side(self, lp: LivePosition, level: float, is_sl: bool) -> bool:
+        """True, если защитный уровень на правильной стороне от цены.
+
+        Для лонга: стоп ниже, тейк выше; для шорта -- наоборот. Если опорной
+        цены нет (не знаем вход) -- не блокируем (возвращаем True).
+        """
+        ref = self._protective_ref(lp)
+        if ref is None:
+            return True
+        if lp.is_long:
+            return level < ref if is_sl else level > ref
+        return level > ref if is_sl else level < ref
+
     def sync_protective_orders(self) -> None:
-        """Переставляет биржевые SL/TP под текущую позицию (если изменились)."""
+        """Переставляет биржевые SL/TP под текущую позицию (если изменились).
+
+        Стоп-лосс критичен: если он желателен, но не встал (отказ биржи или
+        неверная сторона уровня), поднимаем ProtectiveOrderError -- движок
+        закроет позицию (не оставляем её без защиты). Тейк-профит некритичен:
+        при сбое только предупреждаем.
+        """
         if self.dry_run:
             return
         # Незалитый лимитный вход ждёт исполнения и не защищён позицией -- его
@@ -594,13 +660,34 @@ class LiveBroker:
             return
         self.cancel_all_orders()
         exit_side = "sell" if lp.is_long else "buy"
-        try:
-            if self._desired_sl is not None:
-                # Стоп-лосс -- всегда стоп-маркет: гарантия выхода важнее комиссии.
-                self.client.create_stop_order(
-                    self.symbol, exit_side, lp.size, self._desired_sl, kind="stop"
+
+        # --- Стоп-лосс (критично) -------------------------------------- #
+        sl_failed = False
+        if self._desired_sl is not None:
+            if not self._level_on_correct_side(lp, self._desired_sl, is_sl=True):
+                self.emit(
+                    "error",
+                    f"⛔ Стоп-лосс {self._desired_sl:g} на НЕВЕРНОЙ стороне для "
+                    f"{lp.side} (вход ~{lp.entry_price:g}) — не выставляю",
+                    {"protective": "sl_invalid"},
                 )
-            if self._desired_tp is not None:
+                sl_failed = True
+            else:
+                try:
+                    # Стоп-лосс -- всегда стоп-маркет: гарантия выхода важнее комиссии.
+                    self.client.create_stop_order(
+                        self.symbol, exit_side, lp.size, self._desired_sl, kind="stop"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.emit("error", f"⛔ Не удалось выставить СТОП-ЛОСС: {exc}",
+                              {"protective": "sl"})
+                    sl_failed = True
+
+        # --- Тейк-профит (некритично) ---------------------------------- #
+        if self._desired_tp is not None and self._level_on_correct_side(
+            lp, self._desired_tp, is_sl=False
+        ):
+            try:
                 if tp_maker:
                     # Тейк-профит мейкером: reduce-only лимит по цели (экономит комиссию).
                     self.client.create_limit_order(
@@ -612,16 +699,39 @@ class LiveBroker:
                         self.symbol, exit_side, lp.size, self._desired_tp,
                         kind="take_profit",
                     )
-            self._synced_protect = key
-            if self._desired_sl is not None or self._desired_tp is not None:
-                self.emit(
-                    "info",
-                    f"Защитные ордера: SL={self._desired_sl} TP={self._desired_tp} "
-                    f"на {lp.size:g} конт.",
-                    None,
+            except Exception as exc:  # noqa: BLE001
+                self.emit("error", f"Тейк-профит не выставлен (не критично): {exc}",
+                          {"protective": "tp"})
+        elif self._desired_tp is not None:
+            self.emit(
+                "info",
+                f"Тейк-профит {self._desired_tp:g} на неверной стороне для "
+                f"{lp.side} — пропуск",
+                None,
+            )
+
+        # --- Позиция осталась без стопа? ------------------------------- #
+        if sl_failed:
+            self._synced_protect = ()   # форсим повтор/обработку на след. баре
+            if self.execution.require_protective:
+                raise ProtectiveOrderError(
+                    "стоп-лосс не выставлен — позиция осталась бы без защиты"
                 )
-        except Exception as exc:  # noqa: BLE001
-            self.emit("error", f"Не удалось выставить SL/TP: {exc}", None)
+            self.emit(
+                "error",
+                "⚠️ ВНИМАНИЕ: позиция БЕЗ стоп-лосса (require_protective=False)",
+                {"protective": "naked"},
+            )
+            return
+
+        self._synced_protect = key
+        if self._desired_sl is not None or self._desired_tp is not None:
+            self.emit(
+                "info",
+                f"Защитные ордера: SL={self._desired_sl} TP={self._desired_tp} "
+                f"на {lp.size:g} конт.",
+                None,
+            )
 
     # ------------------------------------------------------------------ #
     # Сериализация состояния (для персистентности между перезапусками)

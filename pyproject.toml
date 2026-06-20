@@ -50,6 +50,11 @@ dev = [
 [project.gui-scripts]
 algo-desktop = "desktop_app:main"
 
+# Консольный (headless) раннер live-торговли для VPS/сервера: `algo-live`.
+# Это обычный scripts (нужен stdout для journald), запускается без Qt/дисплея.
+[project.scripts]
+algo-live = "live.runner:main"
+
 # Плоская раскладка (пакеты + одиночные модули в корне) — авто-discovery
 # setuptools на ней спотыкается, поэтому состав дистрибутива задаём явно.
 # tests/ и dev-скрипты (main/sanity_check/gui_smoke_test) в пакет не входят:

@@ -22,7 +22,13 @@ import pandas as pd
 
 from backtester.base_strategy import Bar, BaseStrategy
 
-from .broker import ExecutionConfig, LiveBroker, RiskLimits, SizingConfig
+from .broker import (
+    ExecutionConfig,
+    LiveBroker,
+    ProtectiveOrderError,
+    RiskLimits,
+    SizingConfig,
+)
 from .exchange import ExchangeClient, ExchangeError, drop_forming_candle
 
 
@@ -123,9 +129,13 @@ class LiveTradingEngine:
             {"running": True},
         )
 
-        # Плечо/режим маржи -- best-effort (ошибки не критичны)
+        # Плечо/режим маржи/one-way -- best-effort, но о реальных сбоях сообщаем
+        # (тихий провал = торговля на чужом плече/в hedge-режиме).
         if not cfg.dry_run:
-            self.client.set_leverage(cfg.leverage, cfg.symbol, cfg.margin_mode)
+            for warn in self.client.ensure_one_way(cfg.symbol):
+                self._emit("error", warn, {"warn": True})
+            for warn in self.client.set_leverage(cfg.leverage, cfg.symbol, cfg.margin_mode):
+                self._emit("error", warn, {"warn": True})
 
         broker = LiveBroker(
             client=self.client,
@@ -193,13 +203,25 @@ class LiveTradingEngine:
                     free_usdt=bal["free"], total_usdt=bal["total"],
                     now=pd.Timestamp(new_ts),
                 )
-                # Предохранитель дневного убытка ПЕРЕД новыми сделками
-                if self._daily_loss_tripped(bal["total"], pd.Timestamp(new_ts)):
+                # Предохранитель дневного убытка ПЕРЕД новыми сделками.
+                # Эквити = баланс кошелька + uPnL открытой позиции (begin_bar уже
+                # перечитал её с биржи), иначе открытая просадка не взвела бы стоп.
+                equity = self._equity_with_upnl(broker, bal["total"])
+                if self._daily_loss_tripped(equity, pd.Timestamp(new_ts)):
                     self._trip_kill_switch(broker)
                     break
                 self._run_strategy_step(broker, closed)
                 broker.sync_protective_orders()
                 self._emit_position(broker)
+            except ProtectiveOrderError as exc:
+                self._emit(
+                    "error",
+                    f"⛔ Позицию не удалось защитить ({exc}). "
+                    f"Аварийно закрываю и останавливаюсь.",
+                    {"risk": "protective", "fatal": True},
+                )
+                self._trip_kill_switch(broker)
+                break
             except ExchangeError as exc:
                 self._emit("error", f"Биржа на баре: {exc} — продолжаю")
             except Exception as exc:  # noqa: BLE001 - ошибка стратегии: фатально
@@ -218,6 +240,21 @@ class LiveTradingEngine:
     # ------------------------------------------------------------------ #
     # Предохранитель дневного убытка (kill switch)
     # ------------------------------------------------------------------ #
+    def _equity_with_upnl(self, broker: LiveBroker, wallet_total: float) -> float:
+        """Эквити счёта = баланс кошелька + uPnL открытой позиции.
+
+        ccxt `total` обычно отдаёт wallet balance БЕЗ нереализованного PnL, из-за
+        чего рубильник «видел» бы убыток только после закрытия позиции. Прибавляем
+        uPnL, перечитанный с биржи в begin_bar (0, если позиции нет или биржа
+        uPnL не вернула -- тогда поведение как раньше).
+        """
+        pos = broker._position
+        upnl = pos.unrealized_pnl if pos is not None else 0.0
+        try:
+            return float(wallet_total) + float(upnl)
+        except (TypeError, ValueError):
+            return float(wallet_total)
+
     def _daily_loss_tripped(self, equity: float, now: pd.Timestamp) -> bool:
         """True, если просадка эквити от старта суток (UTC) достигла лимита."""
         limit = self.cfg.risk.max_daily_loss_pct
