@@ -9,7 +9,7 @@ JSON-файле с правами доступа 0600 (чтение/запись
 Структура файла::
 
     {
-      "binance": {"demo": {"api_key": "...", "secret": "..."}, "real": {...}},
+      "bingx": {"demo": {"api_key": "...", "secret": "..."}, "real": {...}},
       "lighter": {"real": {"private_key": "...", "account_index": "0",
                            "api_key_index": "0"}},
       ...

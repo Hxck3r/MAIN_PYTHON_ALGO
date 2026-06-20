@@ -1,7 +1,7 @@
 """Окно live-торговли на криптобиржах (отдельно от тестера стратегий).
 
 Открывается кнопкой из главного окна. Здесь можно:
-    * настроить подключение к бирже (Binance — CEX или Lighter — DEX), демо/реал;
+    * настроить подключение к бирже (BingX — CEX или Lighter — DEX), демо/реал;
     * перенести стратегию из тестера (или выбрать другую) и её параметры;
     * выбрать символ -- появляется график цены;
     * запустить автоматическую торговлю по сигналам стратегии.
@@ -157,7 +157,7 @@ class TradingWindow(QMainWindow):
         mode_w.setLayout(mode_row)
 
         # Поля ключей строятся динамически под схему выбранной биржи:
-        # CEX (Binance) — API Key + Secret; DEX (Lighter) — приватный ключ API
+        # CEX (BingX) — API Key + Secret; DEX (Lighter) — приватный ключ API
         # и индексы аккаунта (Account Index / API Key Index).
         self._cred_edits: dict[str, QLineEdit] = {}
         self.cred_form = QFormLayout()

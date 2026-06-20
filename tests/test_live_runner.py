@@ -14,7 +14,7 @@ from live import credentials, runner
 
 def _write_cfg(tmp_path, **over):
     cfg = {
-        "exchange": "binance",
+        "exchange": "bingx",
         "mode": "demo",
         "symbol": "BTC/USDT:USDT",
         "timeframe": "4h",
@@ -92,7 +92,7 @@ def test_resolve_credentials_prefers_env(monkeypatch):
     )
     monkeypatch.setenv("ALGO_CRED_API_KEY", "envkey")
     monkeypatch.setenv("ALGO_CRED_SECRET", "envsecret")
-    creds = runner.resolve_credentials("binance", "demo")
+    creds = runner.resolve_credentials("bingx", "demo")
     assert creds == {"api_key": "envkey", "secret": "envsecret"}
 
 
@@ -103,7 +103,7 @@ def test_resolve_credentials_falls_back_to_store(monkeypatch):
         credentials, "load",
         lambda e, m: credentials.Credentials(values={"api_key": "k", "secret": "s"}),
     )
-    creds = runner.resolve_credentials("binance", "demo")
+    creds = runner.resolve_credentials("bingx", "demo")
     assert creds == {"api_key": "k", "secret": "s"}
 
 
@@ -114,7 +114,7 @@ def test_resolve_credentials_missing_required_raises(monkeypatch):
         credentials, "load", lambda e, m: credentials.Credentials(values={})
     )
     with pytest.raises(runner.ConfigError):
-        runner.resolve_credentials("binance", "demo")
+        runner.resolve_credentials("bingx", "demo")
 
 
 # --------------------------------------------------------------------------- #

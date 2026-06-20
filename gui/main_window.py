@@ -369,7 +369,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(line)
         self.btn_trade = QPushButton("🟢  Торговля (демо / реал)…")
         self.btn_trade.setToolTip(
-            "Открыть отдельное окно live-торговли на бирже (Binance — CEX или Lighter — DEX).\n"
+            "Открыть отдельное окно live-торговли на бирже (BingX — CEX или Lighter — DEX).\n"
             "Текущая стратегия и её параметры переносятся туда автоматически."
         )
         self.btn_trade.clicked.connect(self._open_trading_window)

@@ -439,7 +439,7 @@ cp live/trade.example.json ~/trade.json
 
 Откройте `~/trade.json` в любом редакторе. Это обычный текст; главные поля:
 
-- `exchange` — `"lighter"` или `"binance"`; `mode` — `"demo"` (тестнет) или `"real"`;
+- `exchange` — `"lighter"` или `"bingx"`; `mode` — `"demo"` (тестнет) или `"real"`;
 - `symbol`, `timeframe` — что и на каком таймфрейме торговать;
 - `strategy` — **точное имя** стратегии (как в выпадающем списке GUI) или имя её
   класса; `strategy_params` — её параметры (те же, что вы подбирали в тестере);
@@ -457,7 +457,7 @@ cp live/trade.example.json ~/trade.json
 export ALGO_CRED_PRIVATE_KEY=...        # Lighter: приватный ключ API
 export ALGO_CRED_ACCOUNT_INDEX=0
 export ALGO_CRED_API_KEY_INDEX=4
-# для Binance вместо этого: ALGO_CRED_API_KEY и ALGO_CRED_SECRET
+# для BingX вместо этого: ALGO_CRED_API_KEY и ALGO_CRED_SECRET
 ```
 
 **3. Прогон вживую.** Сначала безопасно — «сухой прогон» (цикл работает, но ордера

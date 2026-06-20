@@ -1,6 +1,6 @@
 """Адаптер криптобирж поверх ccxt (USDT-перпетуалы / swap).
 
-Единый интерфейс к Binance (CEX) и Lighter (DEX): данные (OHLCV, тикер, список
+Единый интерфейс к BingX (CEX) и Lighter (DEX): данные (OHLCV, тикер, список
 символов), счёт (баланс, позиция) и исполнение (рыночные ордера, защитные
 стоп-ордера, плечо). Всё приводится к каноническому виду фреймворка, чтобы
 существующие стратегии и график работали без изменений.
@@ -44,7 +44,7 @@ class CredField:
     required: bool = True     # обязательно ли для подключения
 
 
-#: поля для обычных CEX (Binance и т.п.)
+#: поля для обычных CEX (BingX и т.п.)
 _CEX_FIELDS: tuple[CredField, ...] = (
     CredField("api_key", "API Key", True, "API Key"),
     CredField("secret", "API Secret", True, "API Secret"),
@@ -84,12 +84,12 @@ class ExchangeMeta:
 
 #: реестр поддерживаемых бирж (ключ -- наш внутренний id)
 EXCHANGES: dict[str, ExchangeMeta] = {
-    "binance": ExchangeMeta(
-        ccxt_id="binance",
-        label="Binance",
+    "bingx": ExchangeMeta(
+        ccxt_id="bingx",
+        label="BingX",
         supports_demo=True,
         futures_orders_ok=True,
-        note="Полноценный фьючерсный testnet (testnet.binancefuture.com).",
+        note="Демо-фьючерсы (VST) через testnet open-api-vst.bingx.com.",
     ),
     "lighter": ExchangeMeta(
         ccxt_id="lighter",
@@ -174,7 +174,7 @@ class ExchangeClient:
 
     Параметры
     ---------
-    exchange_id: ключ из EXCHANGES ("binance"/"lighter").
+    exchange_id: ключ из EXCHANGES ("bingx"/"lighter").
     mode:        MODE_DEMO (тестнет/демо) или MODE_REAL (реальный счёт).
     creds:       словарь полей ключей (по схеме биржи, см. ExchangeMeta.cred_fields):
                  у CEX -- {"api_key", "secret"}; у DEX Lighter --
@@ -243,7 +243,7 @@ class ExchangeClient:
     def _build_ccxt_config(self, creds: dict[str, str]) -> dict[str, Any]:
         """Конфиг ccxt с учётом схемы аутентификации биржи.
 
-        CEX (Binance) -- apiKey + secret. DEX (Lighter) -- приватный ключ API +
+        CEX (BingX) -- apiKey + secret. DEX (Lighter) -- приватный ключ API +
         индексы аккаунта + нативная библиотека-подписант (см. _configure_lighter).
         """
         config: dict[str, Any] = {
@@ -432,8 +432,8 @@ class ExchangeClient:
         """True для «безобидных» отказов биржи: значение уже выставлено / не нужно.
 
         Биржи часто отвечают ошибкой, когда плечо/режим/позиционный режим уже
-        такие, как просим (Binance: -4046 «no need to change leverage», -4059
-        «no need to change position side» и т.п.) -- это не повод тревожить
+        такие, как просим («no need to change leverage», «no need to change
+        position side» и т.п.) -- это не повод тревожить
         пользователя. Также сюда попадает NotSupported (например, у DEX, где
         концепции hedge-режима нет).
         """
