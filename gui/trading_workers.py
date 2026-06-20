@@ -7,7 +7,7 @@ ccxt-инстанс не делится между потоками (он не �
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -18,18 +18,18 @@ from live.exchange import ExchangeClient, ExchangeError
 
 @dataclass
 class ConnectionSpec:
-    """Всё необходимое для построения ExchangeClient."""
+    """Всё необходимое для построения ExchangeClient.
+
+    creds -- словарь полей ключей по схеме биржи (api_key/secret у CEX либо
+    private_key/account_index/api_key_index у DEX Lighter).
+    """
 
     exchange_id: str
     mode: str
-    api_key: str = ""
-    secret: str = ""
+    creds: dict = field(default_factory=dict)
 
     def build_client(self) -> ExchangeClient:
-        return ExchangeClient(
-            self.exchange_id, mode=self.mode,
-            api_key=self.api_key, secret=self.secret,
-        )
+        return ExchangeClient(self.exchange_id, mode=self.mode, creds=self.creds)
 
 
 class ConnectionTestWorker(QThread):

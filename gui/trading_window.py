@@ -1,7 +1,7 @@
 """Окно live-торговли на криптобиржах (отдельно от тестера стратегий).
 
 Открывается кнопкой из главного окна. Здесь можно:
-    * настроить подключение к бирже (BingX / MEXC / Binance), демо или реал;
+    * настроить подключение к бирже (Binance — CEX или Lighter — DEX), демо/реал;
     * перенести стратегию из тестера (или выбрать другую) и её параметры;
     * выбрать символ -- появляется график цены;
     * запустить автоматическую торговлю по сигналам стратегии.
@@ -143,9 +143,6 @@ class TradingWindow(QMainWindow):
         self.combo_exchange = QComboBox()
         for ex_id in _EX_IDS:
             self.combo_exchange.addItem(EXCHANGES[ex_id].label, ex_id)
-        # MEXC первым приоритетом пользователя
-        if "mexc" in _EX_IDS:
-            self.combo_exchange.setCurrentIndex(_EX_IDS.index("mexc"))
         self.combo_exchange.currentIndexChanged.connect(self._on_exchange_changed)
 
         self.radio_demo = QRadioButton("Демо / тестнет")
@@ -159,12 +156,14 @@ class TradingWindow(QMainWindow):
         mode_w = QWidget()
         mode_w.setLayout(mode_row)
 
-        self.edit_key = QLineEdit()
-        self.edit_key.setEchoMode(QLineEdit.Password)
-        self.edit_key.setPlaceholderText("API Key")
-        self.edit_secret = QLineEdit()
-        self.edit_secret.setEchoMode(QLineEdit.Password)
-        self.edit_secret.setPlaceholderText("API Secret")
+        # Поля ключей строятся динамически под схему выбранной биржи:
+        # CEX (Binance) — API Key + Secret; DEX (Lighter) — приватный ключ API
+        # и индексы аккаунта (Account Index / API Key Index).
+        self._cred_edits: dict[str, QLineEdit] = {}
+        self.cred_form = QFormLayout()
+        self.cred_form.setContentsMargins(0, 0, 0, 0)
+        cred_w = QWidget()
+        cred_w.setLayout(self.cred_form)
 
         self.spin_leverage = QSpinBox(minimum=1, maximum=125, value=5)
         self.spin_leverage.setSuffix("×")
@@ -173,8 +172,7 @@ class TradingWindow(QMainWindow):
 
         conn_form.addRow("Биржа:", self.combo_exchange)
         conn_form.addRow("Режим:", mode_w)
-        conn_form.addRow("API Key:", self.edit_key)
-        conn_form.addRow("API Secret:", self.edit_secret)
+        conn_form.addRow(cred_w)
         conn_form.addRow("Плечо:", self.spin_leverage)
         conn_form.addRow("Маржа:", self.combo_margin)
 
@@ -276,11 +274,23 @@ class TradingWindow(QMainWindow):
             "TP как reduce-only лимит (мейкер) вместо тейк-маркета. Стоп-лосс "
             "всегда остаётся стоп-маркетом — гарантия выхода важнее комиссии."
         )
+        self.spin_max_slippage = QDoubleSpinBox(
+            minimum=0.0, maximum=100.0, value=1.0, decimals=2
+        )
+        self.spin_max_slippage.setSuffix(" %")
+        self.spin_max_slippage.setSpecialValueText("выкл")
+        self.spin_max_slippage.setToolTip(
+            "Максимальное проскальзывание для рыночного входа. Если к моменту "
+            "исполнения цена ушла против входа дальше этого процента — ордер не "
+            "выставляется (вход пропускается). 0 = выкл. Закрытия и защитные "
+            "ордера никогда не блокируются."
+        )
         self.chk_entry_limit.toggled.connect(self._on_execution_changed)
         exec_form.addRow(self.chk_entry_limit)
         exec_form.addRow(self.chk_post_only)
         exec_form.addRow("Отступ лимита:", self.spin_limit_offset)
         exec_form.addRow(self.chk_tp_maker)
+        exec_form.addRow("Макс. проскальзывание:", self.spin_max_slippage)
         self._on_execution_changed()
         layout.addWidget(exec_box)
 
@@ -394,12 +404,34 @@ class TradingWindow(QMainWindow):
         else:
             self.lbl_warn.setText("Демо/тестнет: средства виртуальные.")
             self.lbl_warn.setStyleSheet("color: #16c784; padding: 4px;")
-        # Подгружаем сохранённые ключи для (биржа, режим)
-        creds = live.credentials.load(self._current_exchange_id(), self._current_mode())
-        self.edit_key.setText(creds.api_key)
-        self.edit_secret.setText(creds.secret)
+        # Перестраиваем поля ключей под схему биржи и подгружаем сохранённые
+        self._rebuild_cred_fields()
         self._connected = False
         self.btn_start.setEnabled(False)
+
+    def _rebuild_cred_fields(self) -> None:
+        """Пересобрать поля ключей под текущую биржу и заполнить сохранённым.
+
+        У CEX это API Key + Secret, у DEX Lighter — приватный ключ API и индексы
+        аккаунта (см. EXCHANGES[...].cred_fields).
+        """
+        while self.cred_form.rowCount():
+            self.cred_form.removeRow(0)
+        self._cred_edits.clear()
+        meta = EXCHANGES[self._current_exchange_id()]
+        creds = live.credentials.load(self._current_exchange_id(), self._current_mode())
+        trading = (
+            self._engine_thread is not None and self._engine_thread.isRunning()
+        )
+        for f in meta.cred_fields:
+            edit = QLineEdit()
+            if f.secret:
+                edit.setEchoMode(QLineEdit.Password)
+            edit.setPlaceholderText(f.placeholder or f.label)
+            edit.setText(creds.get(f.key))
+            edit.setEnabled(not trading)
+            self.cred_form.addRow(f.label + ":", edit)
+            self._cred_edits[f.key] = edit
 
     def _on_strategy_changed(self) -> None:
         cls = self._strategy_cls()
@@ -434,17 +466,22 @@ class TradingWindow(QMainWindow):
         return ConnectionSpec(
             exchange_id=self._current_exchange_id(),
             mode=self._current_mode(),
-            api_key=self.edit_key.text().strip(),
-            secret=self.edit_secret.text().strip(),
+            creds={k: e.text().strip() for k, e in self._cred_edits.items()},
         )
 
     def _test_connection(self) -> None:
         if self._busy_with_worker():
             return
         spec = self._make_spec()
-        if not spec.api_key or not spec.secret:
+        meta = EXCHANGES[spec.exchange_id]
+        missing = [
+            f.label for f in meta.cred_fields
+            if f.required and not spec.creds.get(f.key, "").strip()
+        ]
+        if missing:
             QMessageBox.warning(
-                self, "Ключи", "Введите API Key и API Secret для подключения."
+                self, "Ключи",
+                "Заполните поля для подключения: " + ", ".join(missing) + ".",
             )
             return
         self._spec = spec
@@ -488,8 +525,7 @@ class TradingWindow(QMainWindow):
 
     def _save_keys(self) -> None:
         creds = live.Credentials(
-            api_key=self.edit_key.text().strip(),
-            secret=self.edit_secret.text().strip(),
+            values={k: e.text().strip() for k, e in self._cred_edits.items()}
         )
         path = live.credentials.save(
             self._current_exchange_id(), self._current_mode(), creds
@@ -604,6 +640,7 @@ class TradingWindow(QMainWindow):
             post_only=self.chk_post_only.isChecked(),
             limit_offset_bps=self.spin_limit_offset.value(),
             tp_maker=self.chk_tp_maker.isChecked(),
+            max_slippage_pct=self.spin_max_slippage.value(),
         )
 
     def _risk_limits(self) -> RiskLimits:
@@ -688,15 +725,18 @@ class TradingWindow(QMainWindow):
         # На время торговли блокируем смену подключения/стратегии/символа
         for w in (
             self.combo_exchange, self.radio_demo, self.radio_real,
-            self.edit_key, self.edit_secret, self.btn_test,
+            self.btn_test, self.btn_save_keys,
             self.combo_strategy, self.param_table, self.combo_symbol,
             self.combo_timeframe, self.btn_reload_symbols, self.chk_dry,
             self.spin_leverage, self.combo_margin,
             self.chk_entry_limit, self.chk_post_only, self.spin_limit_offset,
-            self.chk_tp_maker, self.spin_max_notional, self.spin_max_orders_hour,
+            self.chk_tp_maker, self.spin_max_slippage,
+            self.spin_max_notional, self.spin_max_orders_hour,
             self.spin_max_daily_loss,
         ):
             w.setEnabled(not trading)
+        for edit in self._cred_edits.values():
+            edit.setEnabled(not trading)
 
     # ================================================================== #
     # События движка

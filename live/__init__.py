@@ -1,4 +1,4 @@
-"""Пакет live-торговли на криптобиржах (BingX / MEXC / Binance).
+"""Пакет live-торговли на криптобиржах (Binance — CEX, Lighter — DEX).
 
 Запускает существующие стратегии «вживую» на демо (тестнет) и реальных счетах
 USDT-перпетуалов через единый адаптер ccxt. Архитектура повторяет бэктестер:
@@ -47,8 +47,20 @@ def get_exchanges() -> dict:
     return EXCHANGES
 
 
-def make_client(exchange_id: str, mode: str, api_key: str = "", secret: str = ""):
-    """Фабрика ExchangeClient (бросит понятную ошибку, если ccxt не установлена)."""
+def make_client(
+    exchange_id: str,
+    mode: str,
+    creds: dict | None = None,
+    api_key: str = "",
+    secret: str = "",
+):
+    """Фабрика ExchangeClient (бросит понятную ошибку, если ccxt не установлена).
+
+    creds -- словарь полей ключей по схеме биржи (см. ExchangeMeta.cred_fields);
+    api_key/secret оставлены для совместимости со старым способом вызова (CEX).
+    """
     from .exchange import ExchangeClient
 
-    return ExchangeClient(exchange_id, mode=mode, api_key=api_key, secret=secret)
+    return ExchangeClient(
+        exchange_id, mode=mode, creds=creds, api_key=api_key, secret=secret
+    )

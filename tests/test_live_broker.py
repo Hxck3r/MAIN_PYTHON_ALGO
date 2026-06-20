@@ -23,9 +23,13 @@ class FakeExchange:
         self.cancels = 0
         self.net = 0.0                         # signed contracts
         self.reject = False                    # рыночный ордер -> отказ биржи
+        self.ticker = 100.0                    # текущая цена (для проверки проскальзывания)
 
     def contract_size(self, symbol: str) -> float:
         return 1.0
+
+    def fetch_ticker_last(self, symbol: str) -> float:
+        return self.ticker
 
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         return round(amount, 6)
@@ -226,6 +230,56 @@ def test_close_bypasses_rate_limit():
     _begin(broker, price=100.0)
     broker.close_position()                          # reduce-only закрытие проходит
     assert ex.orders[-1][2] is True                  # последний ордер reduceOnly
+
+
+# --------------------------------------------------------------------------- #
+# Максимальное проскальзывание: рыночный вход отменяется при сильном движении
+# --------------------------------------------------------------------------- #
+def test_slippage_blocks_entry_when_price_moved_against():
+    # лимит 0.5%, цена ушла вверх на 1% -> рыночный buy не выставляется
+    ex, broker, events = _new_broker(execution=ExecutionConfig(max_slippage_pct=0.5))
+    _begin(broker, price=100.0)
+    ex.ticker = 101.0
+    broker.buy()
+    assert ex.orders == []
+    assert broker.position is None
+    assert any(kind == "info" for kind, _ in events)
+
+
+def test_slippage_allows_entry_within_limit():
+    ex, broker, _ = _new_broker(execution=ExecutionConfig(max_slippage_pct=2.0))
+    _begin(broker, price=100.0)
+    ex.ticker = 101.0                               # +1% < лимита 2% -> проходит
+    broker.buy()
+    assert ex.orders == [("buy", 1.0, False)]
+
+
+def test_slippage_ignores_favorable_move():
+    # для buy падение цены — В ПОЛЬЗУ входа, не блокируется даже при узком лимите
+    ex, broker, _ = _new_broker(execution=ExecutionConfig(max_slippage_pct=0.5))
+    _begin(broker, price=100.0)
+    ex.ticker = 99.0
+    broker.buy()
+    assert ex.orders == [("buy", 1.0, False)]
+
+
+def test_slippage_never_blocks_close():
+    ex, broker, _ = _new_broker(execution=ExecutionConfig(max_slippage_pct=0.1))
+    _begin(broker, price=100.0)
+    broker.buy()                                    # вход без движения (ticker=100)
+    _begin(broker, price=100.0)
+    ex.ticker = 200.0                               # огромное движение
+    broker.close_position()                         # закрытие обязано пройти
+    assert ex.orders[-1][2] is True                 # reduceOnly закрытие исполнено
+
+
+def test_slippage_disabled_by_default_does_not_query_ticker():
+    # при выключенной проверке (default 0) тикер не запрашивается даже при движении
+    ex, broker, _ = _new_broker()
+    _begin(broker, price=100.0)
+    ex.ticker = 150.0
+    broker.buy()
+    assert ex.orders == [("buy", 1.0, False)]
 
 
 # --------------------------------------------------------------------------- #

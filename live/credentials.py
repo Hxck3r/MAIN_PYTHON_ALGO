@@ -9,22 +9,25 @@ JSON-файле с правами доступа 0600 (чтение/запись
 Структура файла::
 
     {
-      "mexc":    {"demo": {"api_key": "...", "secret": "..."}, "real": {...}},
-      "binance": {"demo": {...}},
+      "binance": {"demo": {"api_key": "...", "secret": "..."}, "real": {...}},
+      "lighter": {"real": {"private_key": "...", "account_index": "0",
+                           "api_key_index": "0"}},
       ...
     }
 
 Ключ верхнего уровня -- id биржи (как в live.exchange.EXCHANGES); второй уровень --
-режим: "demo" (тестнет/демо) или "real" (реальный счёт).
+режим: "demo" (тестнет/демо) или "real" (реальный счёт). Набор полей третьего
+уровня зависит от схемы биржи (CEX -- api_key/secret; DEX -- private_key и индексы
+аккаунта), см. live.exchange.ExchangeMeta.cred_fields.
 """
 from __future__ import annotations
 
 import json
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 APP_DIR_NAME = "main_python_algo"
 CRED_FILENAME = "credentials.json"
@@ -45,14 +48,29 @@ def credentials_path() -> Path:
 
 @dataclass
 class Credentials:
-    """Пара ключей для конкретной биржи и режима."""
+    """Набор полей ключей для биржи и режима (состав зависит от схемы биржи).
 
-    api_key: str = ""
-    secret: str = ""
+    Значения хранятся в словаре ``values`` с ключами из ExchangeMeta.cred_fields
+    (например ``api_key``/``secret`` у CEX или ``private_key``/``account_index``/
+    ``api_key_index`` у DEX Lighter).
+    """
+
+    values: dict[str, str] = field(default_factory=dict)
+
+    def get(self, key: str) -> str:
+        return str(self.values.get(key, "") or "")
 
     @property
-    def is_filled(self) -> bool:
-        return bool(self.api_key.strip()) and bool(self.secret.strip())
+    def api_key(self) -> str:
+        return self.get("api_key")
+
+    @property
+    def secret(self) -> str:
+        return self.get("secret")
+
+    def is_filled(self, required: Iterable[str] = ("api_key", "secret")) -> bool:
+        """Все ли перечисленные поля заполнены непустым значением."""
+        return all(self.get(k).strip() for k in required)
 
 
 def _read_all() -> dict:
@@ -82,18 +100,16 @@ def _write_all(data: dict) -> None:
 def load(exchange_id: str, mode: str) -> Credentials:
     """Загрузить ключи для (биржа, режим). Пустые, если не сохранены."""
     section = _read_all().get(exchange_id, {}).get(mode, {})
-    return Credentials(
-        api_key=str(section.get("api_key", "")),
-        secret=str(section.get("secret", "")),
-    )
+    if not isinstance(section, dict):
+        section = {}
+    return Credentials(values={str(k): str(v) for k, v in section.items()})
 
 
 def save(exchange_id: str, mode: str, creds: Credentials) -> Path:
     """Сохранить ключи для (биржа, режим). Возвращает путь к файлу."""
     data = _read_all()
     data.setdefault(exchange_id, {})[mode] = {
-        "api_key": creds.api_key.strip(),
-        "secret": creds.secret.strip(),
+        str(k): str(v).strip() for k, v in creds.values.items()
     }
     _write_all(data)
     return credentials_path()

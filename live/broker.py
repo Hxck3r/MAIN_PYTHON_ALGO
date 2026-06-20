@@ -50,12 +50,17 @@ class ExecutionConfig:
     tp_maker    -- тейк-профит выставлять reduce-only ЛИМИТНЫМ ордером (мейкер)
         вместо тейк-маркета. Стоп-лосс всегда остаётся стоп-маркетом (гарантия
         выхода важнее комиссии).
+    max_slippage_pct -- максимальное проскальзывание для РЫНОЧНОГО входа в %.
+        Если к моменту исполнения цена ушла ПРОТИВ входа дальше этого процента
+        от цены закрытия бара, ордер не выставляется (вход пропускается).
+        0 -- проверка выключена. Закрытия и защитные ордера не блокируются.
     """
 
     entry_limit: bool = False
     post_only: bool = True
     limit_offset_bps: float = 1.0
     tp_maker: bool = False
+    max_slippage_pct: float = 0.0
 
 
 @dataclass
@@ -439,6 +444,34 @@ class LiveBroker:
             contracts = min_amt
         return max(contracts, 0.0)
 
+    def _slippage_blocks_entry(self, side: str) -> bool:
+        """True -> рыночный вход отменён: цена ушла против входа дальше лимита.
+
+        Сравнивает текущую цену биржи с ценой закрытия бара, по которой стратегия
+        приняла решение. Если НЕБЛАГОПРИЯТНОЕ движение (для buy цена выросла, для
+        sell упала) превышает max_slippage_pct, вход не выставляется. Только для
+        входов: закрытия и защитные ордера (reduce_only) никогда не блокируются.
+        """
+        max_slip = self.execution.max_slippage_pct
+        ref = self._last_price
+        if max_slip <= 0 or self.dry_run or not math.isfinite(ref) or ref <= 0:
+            return False
+        try:
+            current = self.client.fetch_ticker_last(self.symbol)
+        except Exception:  # noqa: BLE001 - цену не узнали -> не блокируем вход
+            return False
+        move_pct = (current - ref) / ref * 100.0
+        adverse = move_pct if side == "buy" else -move_pct
+        if adverse > max_slip:
+            self.emit(
+                "info",
+                f"⏭ Вход {side.upper()} пропущен: цена ушла на {adverse:+.2f}% "
+                f"(> лимита проскальзывания {max_slip:.2f}%): {ref:g} → {current:g}",
+                {"slippage_pct": adverse, "limit_pct": max_slip},
+            )
+            return True
+        return False
+
     def _market(
         self, side: str, contracts: float, reduce_only: bool, tag: str
     ) -> Optional[dict]:
@@ -447,6 +480,8 @@ class LiveBroker:
         Возврат None -- сигнал вызывающему НЕ обновлять локальную модель позиции
         (иначе она разойдётся с биржей -- фантомный филл, фикс №2).
         """
+        if not reduce_only and self._slippage_blocks_entry(side):
+            return None
         notional = contracts * (self._contract_size or 1.0) * self._last_price
         label = "сухой прогон" if self.dry_run else "ОРДЕР"
         msg = (

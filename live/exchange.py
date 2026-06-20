@@ -1,6 +1,6 @@
 """Адаптер криптобирж поверх ccxt (USDT-перпетуалы / swap).
 
-Единый интерфейс к BingX, MEXC и Binance: данные (OHLCV, тикер, список
+Единый интерфейс к Binance (CEX) и Lighter (DEX): данные (OHLCV, тикер, список
 символов), счёт (баланс, позиция) и исполнение (рыночные ордера, защитные
 стоп-ордера, плечо). Всё приводится к каноническому виду фреймворка, чтобы
 существующие стратегии и график работали без изменений.
@@ -11,6 +11,7 @@ numba/sklearn в остальном проекте.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -24,45 +25,91 @@ except ImportError:  # pragma: no cover - окружение без ccxt
 
 
 # --------------------------------------------------------------------------- #
+# Схемы аутентификации и поля ключей
+# --------------------------------------------------------------------------- #
+#: классический CEX -- пара apiKey + secret
+AUTH_KEY_SECRET = "key_secret"
+#: DEX -- подпись приватным ключом API + индексы аккаунта (как у Lighter)
+AUTH_DEX_KEY = "dex_key"
+
+
+@dataclass(frozen=True)
+class CredField:
+    """Поле ввода ключа для UI: что хранить, как подписать и маскировать ли ввод."""
+
+    key: str                 # ключ в хранилище и в конфиге ccxt
+    label: str               # подпись поля в окне торговли
+    secret: bool = True      # маскировать ввод (echo = Password)
+    placeholder: str = ""    # подсказка в пустом поле
+    required: bool = True     # обязательно ли для подключения
+
+
+#: поля для обычных CEX (Binance и т.п.)
+_CEX_FIELDS: tuple[CredField, ...] = (
+    CredField("api_key", "API Key", True, "API Key"),
+    CredField("secret", "API Secret", True, "API Secret"),
+)
+#: поля для DEX Lighter. Используем УЖЕ созданный в приложении Lighter ключ API
+#: (его приватный ключ) + индексы аккаунта + путь к нативной библиотеке-подписанту.
+#: Это безопаснее сырого L1-ключа кошелька (ключ API можно отозвать, он не даёт
+#: доступа к самому кошельку) и не требует ончейн-регистрации ключа.
+_LIGHTER_FIELDS: tuple[CredField, ...] = (
+    CredField("private_key", "API Private Key", True,
+              "Приватный ключ API из приложения Lighter"),
+    CredField("account_index", "Account Index", False,
+              "Индекс аккаунта (целое число)"),
+    CredField("api_key_index", "API Key Index", False,
+              "Индекс API-ключа, целое 4–254"),
+    CredField("library_path", "Lighter Signer (.so)", False,
+              "Путь к библиотеке-подписанту .so для вашей ОС"),
+)
+
+
+# --------------------------------------------------------------------------- #
 # Метаданные поддерживаемых бирж
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class ExchangeMeta:
-    """Описание биржи: id для ccxt, поддержка демо и оговорки по ордерам."""
+    """Описание биржи: id для ccxt, поддержка демо, схема ключей и оговорки."""
 
     ccxt_id: str
     label: str
     supports_demo: bool          # есть ли тестнет/демо через sandbox-режим ccxt
     futures_orders_ok: bool      # надёжно ли ставятся ордера на фьючерсы через ccxt
     note: str = ""               # заметка для UI (особенности/ограничения)
+    is_dex: bool = False         # децентрализованная биржа (иной способ ключей)
+    auth: str = AUTH_KEY_SECRET  # схема аутентификации (AUTH_*)
+    cred_fields: tuple[CredField, ...] = _CEX_FIELDS  # какие поля ключей собирать
 
 
 #: реестр поддерживаемых бирж (ключ -- наш внутренний id)
 EXCHANGES: dict[str, ExchangeMeta] = {
-    "mexc": ExchangeMeta(
-        ccxt_id="mexc",
-        label="MEXC",
-        supports_demo=False,
-        futures_orders_ok=False,
-        note=(
-            "Данные, баланс и позиции — ок. ВНИМАНИЕ: выставление ордеров на "
-            "фьючерсы у MEXC через API исторически ограничено самой биржей — "
-            "реальные ордера могут отклоняться. Демо-фьючерсов в ccxt нет."
-        ),
-    ),
-    "bingx": ExchangeMeta(
-        ccxt_id="bingx",
-        label="BingX",
-        supports_demo=True,
-        futures_orders_ok=True,
-        note="Демо-перпетуалы (VST) через sandbox-режим, если доступны на аккаунте.",
-    ),
     "binance": ExchangeMeta(
         ccxt_id="binance",
         label="Binance",
         supports_demo=True,
         futures_orders_ok=True,
         note="Полноценный фьючерсный testnet (testnet.binancefuture.com).",
+    ),
+    "lighter": ExchangeMeta(
+        ccxt_id="lighter",
+        label="Lighter (DEX)",
+        supports_demo=True,
+        futures_orders_ok=True,
+        is_dex=True,
+        auth=AUTH_DEX_KEY,
+        cred_fields=_LIGHTER_FIELDS,
+        note=(
+            "Децентрализованная биржа бессрочных контрактов (расчёт в USDC). "
+            "Создайте ключ API в приложении Lighter и введите его ПРИВАТНЫЙ ключ "
+            "API + индексы (Account Index / API Key Index) — НЕ сырой ключ кошелька "
+            "(так безопаснее: ключ API можно отозвать). ТАКЖЕ нужна нативная "
+            "библиотека-подписант (.so) — скачайте файл для вашей ОС с "
+            "github.com/elliottech/lighter-python (папка lighter/signers) и "
+            "укажите путь к нему. ВНИМАНИЕ: демо — отдельный тестнет, ключи и "
+            "индексы основной сети там не работают. Биржевые стоп/тейк-ордера через "
+            "ccxt у DEX могут поддерживаться ограниченно."
+        ),
     ),
 }
 
@@ -127,15 +174,20 @@ class ExchangeClient:
 
     Параметры
     ---------
-    exchange_id: ключ из EXCHANGES ("mexc"/"bingx"/"binance").
+    exchange_id: ключ из EXCHANGES ("binance"/"lighter").
     mode:        MODE_DEMO (тестнет/демо) или MODE_REAL (реальный счёт).
-    api_key, secret: ключи API (для публичных данных можно оставить пустыми).
+    creds:       словарь полей ключей (по схеме биржи, см. ExchangeMeta.cred_fields):
+                 у CEX -- {"api_key", "secret"}; у DEX Lighter --
+                 {"private_key", "account_index", "api_key_index"}.
+    api_key, secret: устаревший способ передать ключи CEX (для совместимости).
+                 Для публичных данных всё можно оставить пустым.
     """
 
     def __init__(
         self,
         exchange_id: str,
         mode: str = MODE_DEMO,
+        creds: Optional[dict[str, str]] = None,
         api_key: str = "",
         secret: str = "",
     ) -> None:
@@ -150,13 +202,16 @@ class ExchangeClient:
         self.mode = mode
         self.is_demo = mode == MODE_DEMO
 
+        creds = dict(creds or {})
+        # Обратная совместимость со старым вызовом по api_key/secret
+        if api_key:
+            creds.setdefault("api_key", api_key)
+        if secret:
+            creds.setdefault("secret", secret)
+        self.creds = creds
+
         klass = getattr(ccxt, self.meta.ccxt_id)
-        self.ex = klass({
-            "apiKey": api_key or None,
-            "secret": secret or None,
-            "enableRateLimit": True,
-            "options": {"defaultType": "swap"},  # USDT-перпетуалы
-        })
+        self.ex = klass(self._build_ccxt_config(creds))
         if self.is_demo:
             if not self.meta.supports_demo:
                 raise ExchangeError(
@@ -171,6 +226,95 @@ class ExchangeClient:
                 ) from exc
 
         self._markets_loaded = False
+
+    @staticmethod
+    def _dex_index(label: str, raw: Optional[str]) -> Optional[int]:
+        """Разобрать индекс аккаунта/ключа DEX как целое число (или None, если пусто)."""
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise ExchangeError(
+                f"Lighter: «{label}» должен быть целым числом, получено: {raw!r}."
+            ) from exc
+
+    def _build_ccxt_config(self, creds: dict[str, str]) -> dict[str, Any]:
+        """Конфиг ccxt с учётом схемы аутентификации биржи.
+
+        CEX (Binance) -- apiKey + secret. DEX (Lighter) -- приватный ключ API +
+        индексы аккаунта + нативная библиотека-подписант (см. _configure_lighter).
+        """
+        config: dict[str, Any] = {
+            "enableRateLimit": True,
+            "options": {"defaultType": "swap"},  # линейные перпетуалы
+        }
+        if self.meta.auth == AUTH_DEX_KEY:
+            self._configure_lighter(config, creds)
+        else:
+            config["apiKey"] = creds.get("api_key") or None
+            config["secret"] = creds.get("secret") or None
+        return config
+
+    def _configure_lighter(self, config: dict[str, Any], creds: dict[str, str]) -> None:
+        """Настроить ccxt-конфиг для Lighter по УЖЕ созданному ключу API.
+
+        Пользователь создаёт ключ API в приложении Lighter и вводит его приватный
+        ключ + индексы (Account Index / API Key Index). Мы кладём этот ключ прямо
+        в options['auths'][acc][aki]['lighterPrivateKey'] -- тогда ccxt подписывает
+        им запросы через нативную библиотеку, не требуя сырого L1-ключа кошелька и
+        не регистрируя ключ ончейн. ``privateKey`` дублируем тем же ключом, чтобы
+        пройти проверку обязательных учётных данных ccxt (requiredCredentials).
+
+        Индексы обязаны быть ЦЕЛЫМИ: ccxt сравнивает apiKeyIndex численно
+        (`< 4` / `> 254`), и строка дала бы TypeError «'<' between str and int».
+        """
+        opts = config["options"]
+        api_private_key = (creds.get("private_key") or "").strip()
+        account_index = self._dex_index("Account Index", creds.get("account_index"))
+        api_key_index = self._dex_index("API Key Index", creds.get("api_key_index"))
+        library_path = (creds.get("library_path") or "").strip()
+
+        if account_index is not None:
+            opts["accountIndex"] = account_index
+        if api_key_index is not None:
+            opts["apiKeyIndex"] = api_key_index
+        if library_path:
+            if not os.path.isfile(library_path):
+                raise ExchangeError(
+                    f"Lighter: файл библиотеки-подписанта не найден: {library_path}"
+                )
+            opts["libraryPath"] = library_path
+
+        if not api_private_key:
+            return  # только публичные данные (без ключей)
+
+        # Для подписи нужны индексы и библиотека-подписант -- проверяем понятно.
+        if account_index is None or api_key_index is None:
+            raise ExchangeError(
+                "Lighter: для ключа API укажите Account Index и API Key Index "
+                "(целые числа из приложения Lighter)."
+            )
+        if not library_path:
+            raise ExchangeError(
+                "Lighter: для подписи запросов нужна нативная библиотека-подписант. "
+                "Скачайте файл для вашей ОС (например lighter-signer-linux-amd64.so) "
+                "из github.com/elliottech/lighter-python (папка lighter/signers) и "
+                "укажите путь к нему в поле «Lighter Signer (.so)»."
+            )
+
+        config["privateKey"] = api_private_key
+        opts["auths"] = {
+            str(account_index): {
+                str(api_key_index): {
+                    "signer": None,
+                    "lighterPrivateKey": api_private_key,
+                    "deadline": None,
+                    "token": None,
+                }
+            }
+        }
 
     # ------------------------------------------------------------------ #
     # Служебное
@@ -222,16 +366,17 @@ class ExchangeClient:
         """Свободный и общий баланс в валюте расчёта счёта.
 
         Валюта определяется автоматически: обычно USDT, но на демо/тестнете
-        BingX счёт ведётся в VST («виртуальные USDT»), а у некоторых бирж --
-        в другой валюте. Поэтому перебираем предпочтительные коды, а если их
-        нет -- берём валюту с наибольшим балансом. Возвращает также 'currency'.
+        счёт у некоторых бирж ведётся в виртуальной валюте (VST/VUSDT). Поэтому
+        перебираем предпочтительные коды, а если их нет -- берём валюту с
+        наибольшим балансом. Возвращает также 'currency'.
         """
         bal = self.fetch_balance()
         totals = bal.get("total") or {}
         frees = bal.get("free") or {}
 
-        # Порядок предпочтения валюты расчёта (для демо добавляем VST/VUSDT)
-        prefer = [quote]
+        # Порядок предпочтения валюты расчёта: запрошенная, затем USDC (DEX
+        # Lighter ведёт счёт в USDC); для демо добавляем виртуальные VST/VUSDT.
+        prefer = [quote, "USDC"]
         if self.is_demo:
             prefer += ["VST", "VUSDT"]
 
@@ -300,15 +445,21 @@ class ExchangeClient:
     # Рыночные данные
     # ------------------------------------------------------------------ #
     def list_swap_symbols(self, quote: str = "USDT") -> list[str]:
-        """Унифицированные символы линейных USDT-перпетуалов, отсортированы."""
+        """Унифицированные символы линейных перпетуалов, отсортированы.
+
+        Предпочитает контракты в валюте ``quote`` (обычно USDT). Если в ней
+        перпетуалов нет (например, DEX Lighter рассчитывает контракты в USDC) --
+        возвращает все линейные перпетуалы биржи, чтобы список не оказался пустым.
+        """
         self._ensure_markets()
-        out = []
-        for sym, m in self.ex.markets.items():
-            if not m.get("active", True):
-                continue
-            if m.get("swap") and m.get("linear") and m.get("quote") == quote:
-                out.append(sym)
-        return sorted(out)
+        linear_swaps = [
+            sym for sym, m in self.ex.markets.items()
+            if m.get("active", True) and m.get("swap") and m.get("linear")
+        ]
+        preferred = [
+            sym for sym in linear_swaps if self.ex.markets[sym].get("quote") == quote
+        ]
+        return sorted(preferred or linear_swaps)
 
     def fetch_ticker_last(self, symbol: str) -> float:
         try:
