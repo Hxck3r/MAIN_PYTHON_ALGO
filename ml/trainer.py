@@ -330,7 +330,7 @@ def _normalize_importances(columns: list[str], vals: np.ndarray) -> dict[str, fl
     total = vals.sum()
     if total > 0:
         vals = vals / total
-    return dict(sorted(zip(columns, vals), key=lambda kv: kv[1], reverse=True))
+    return dict(sorted(zip(columns, vals, strict=True), key=lambda kv: kv[1], reverse=True))
 
 
 def _feature_importances(model: Any, columns: list[str]) -> dict[str, float]:
@@ -558,7 +558,7 @@ def _train_cpcv(fs: FeatureSet, cfg: TrainConfig, progress: ProgressCb) -> Model
             continue
         w_tr = weights[tr] if weights is not None else None
         model, proba = _fit_predict(cfg, X.iloc[tr], y_tr, X.iloc[te], w_tr, purge_gap)
-        proba_by_pos = dict(zip(te.tolist(), np.asarray(proba, dtype=float)))
+        proba_by_pos = dict(zip(te.tolist(), np.asarray(proba, dtype=float), strict=True))
         sum_proba[te] += np.asarray(proba, dtype=float)
         cnt[te] += 1.0
         for g in combo:                              # разложить предсказания по группам

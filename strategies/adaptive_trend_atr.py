@@ -30,7 +30,7 @@ class TAAdaptiveTrendATR(BaseStrategy):
         fast_len = int(self.p["fast_len"])
         slow_len = int(self.p["slow_len"])
         atr_len = int(self.p["atr_len"])
-        
+
         if fast_len >= slow_len:
             raise ValueError("fast_len должен быть меньше slow_len")
 
@@ -49,7 +49,7 @@ class TAAdaptiveTrendATR(BaseStrategy):
         tr2 = (high_series - prev_close).abs()
         tr3 = (low_series - prev_close).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
+
         # Классический ATR через Wilder's MMA (или RMA), аналог ta.atr в Pine Script
         self.atr = tr.ewm(alpha=1.0 / atr_len, adjust=False).mean().to_numpy()
 
@@ -63,7 +63,7 @@ class TAAdaptiveTrendATR(BaseStrategy):
 
     def next(self, bar: Bar) -> None:
         i = bar.index
-        
+
         # Проверяем прогрев индикаторов
         if i < 1 or np.isnan(self.slow_ema[i]) or np.isnan(self.atr[i]):
             return

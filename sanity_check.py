@@ -182,7 +182,7 @@ def check_5_reproducibility() -> None:
 
     same_equity = a.equity_curve.equals(b.equity_curve)
     same_trades = len(a.trades) == len(b.trades) and all(
-        x.pnl == y.pnl for x, y in zip(a.trades, b.trades)
+        x.pnl == y.pnl for x, y in zip(a.trades, b.trades, strict=True)
     )
     report(
         "Воспроизводимость: повторный запуск идентичен",

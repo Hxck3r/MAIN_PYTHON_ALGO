@@ -481,7 +481,7 @@ def select_plateau_params(
         from itertools import product
 
         for shift in product(*deltas):
-            nb = tuple(k + s for k, s in zip(key, shift))
+            nb = tuple(k + s for k, s in zip(key, shift, strict=True))
             s = score_at.get(nb)
             if s is not None and math.isfinite(s):
                 values.append(s)
@@ -498,7 +498,7 @@ def select_plateau_params(
 
     if best_key is None:
         raise ValueError("В истории нет ни одного валидного испытания")
-    params = {name: axes[name][i] for name, i in zip(names, best_key)}
+    params = {name: axes[name][i] for name, i in zip(names, best_key, strict=True)}
     return params, best_mean
 
 

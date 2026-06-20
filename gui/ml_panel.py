@@ -727,7 +727,7 @@ class MlPanel(QWidget):
             brush=pg.mkBrush(*BAR_BRUSH), pen=pg.mkPen(BG),
         ))
         axis = self.imp_plot.getAxis("left")
-        axis.setTicks([list(zip(ypos.tolist(), names))])
+        axis.setTicks([list(zip(ypos.tolist(), names, strict=True))])
         self.imp_plot.setLabel("bottom", "относительная важность")
 
     def _draw_folds(self, mr) -> None:

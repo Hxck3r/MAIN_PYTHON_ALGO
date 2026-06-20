@@ -48,7 +48,7 @@ class StateStore:
     @classmethod
     def for_session(
         cls, exchange_id: str, mode: str, symbol: str, timeframe: str
-    ) -> "StateStore":
+    ) -> StateStore:
         return cls(state_path(exchange_id, mode, symbol, timeframe))
 
     def load(self) -> dict[str, Any]:

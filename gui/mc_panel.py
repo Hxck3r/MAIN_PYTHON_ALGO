@@ -327,7 +327,7 @@ class McPanel(QWidget):
         )
 
         x_env = np.arange(r.envelope.shape[1], dtype=float)
-        for q, band in zip(r.envelope_q, r.envelope):
+        for q, band in zip(r.envelope_q, r.envelope, strict=True):
             is_median = q == 50
             self.fan_plot.plot(
                 x_env, band,

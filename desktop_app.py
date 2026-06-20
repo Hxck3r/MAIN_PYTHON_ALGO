@@ -22,7 +22,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("AlgoTester")
     window = MainWindow()
-    window.show()           
+    window.show()
     return app.exec()
 
 

@@ -133,7 +133,7 @@ class WfaMatrixConfig:
         anchored: bool = False,
         step_days: int = 0,
         geometric: bool = True,
-    ) -> "WfaMatrixConfig":
+    ) -> WfaMatrixConfig:
         """Конфигурация из диапазонов (min, max, count) для IS и OOS."""
         return cls(
             start=start,

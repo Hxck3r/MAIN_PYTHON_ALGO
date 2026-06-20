@@ -150,7 +150,7 @@ class ParallelEvaluator:
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
-    def __enter__(self) -> "ParallelEvaluator":
+    def __enter__(self) -> ParallelEvaluator:
         return self
 
     def __exit__(self, *exc) -> None:

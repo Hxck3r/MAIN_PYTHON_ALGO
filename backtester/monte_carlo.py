@@ -263,7 +263,7 @@ def _curve_drawdowns(curves: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 # Основной запуск
 # ---------------------------------------------------------------------- #
 def run_monte_carlo(
-    result: "BacktestResult",
+    result: BacktestResult,
     config: Optional[MonteCarloConfig] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,

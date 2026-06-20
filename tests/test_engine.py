@@ -203,7 +203,7 @@ def test_no_lookahead_truncation(synth_1h):
     full_done = [t for t in full.trades if t.exit_bar < cut - 1]
     part_done = [t for t in part.trades if t.exit_reason is not ExitReason.END_OF_DATA]
     assert len(part_done) == len(full_done)
-    for a, b in zip(part_done, full_done):
+    for a, b in zip(part_done, full_done, strict=True):
         assert a.entry_time == b.entry_time
         assert a.exit_time == b.exit_time
         assert a.entry_price == pytest.approx(b.entry_price)

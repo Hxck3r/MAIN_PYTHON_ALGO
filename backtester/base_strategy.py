@@ -34,7 +34,7 @@ class Bar:
     (entry_time / exit_time), а сделок в сотни раз меньше, чем баров.
     """
 
-    __slots__ = ("index", "open", "high", "low", "close", "volume", "_dt_src")
+    __slots__ = ("_dt_src", "close", "high", "index", "low", "open", "volume")
 
     def __init__(
         self,
@@ -108,7 +108,7 @@ class BaseStrategy(ABC):
         self._plots: list[dict[str, Any]] = []
 
         # Заполняются движком через _bind() перед запуском
-        self._broker: Optional["Broker"] = None
+        self._broker: Optional[Broker] = None
         self._data: Optional[pd.DataFrame] = None
         self._i: int = -1
         self._open: np.ndarray = np.empty(0)
@@ -171,7 +171,7 @@ class BaseStrategy(ABC):
     # ------------------------------------------------------------------ #
     # Привязка к движку (вызывается ядром, не пользователем)
     # ------------------------------------------------------------------ #
-    def _bind(self, broker: "Broker", data: pd.DataFrame) -> None:
+    def _bind(self, broker: Broker, data: pd.DataFrame) -> None:
         self._broker = broker
         self._data = data
         self._open = data["open"].to_numpy()
@@ -244,12 +244,12 @@ class BaseStrategy(ABC):
     # Торговый API (делегирование брокеру)
     # ------------------------------------------------------------------ #
     @property
-    def broker(self) -> "Broker":
+    def broker(self) -> Broker:
         assert self._broker is not None, "Стратегия не привязана к движку"
         return self._broker
 
     @property
-    def position(self) -> Optional["Position"]:
+    def position(self) -> Optional[Position]:
         """Текущая открытая позиция или None."""
         return self.broker.position
 
@@ -272,7 +272,7 @@ class BaseStrategy(ABC):
         take_profit: Optional[float] = None,
         risk_pct: Optional[float] = None,
         tag: str = "",
-    ) -> "Order":
+    ) -> Order:
         """Покупка. Тип ордера (взаимоисключающие варианты):
             * без limit_price/stop_price -- рыночный (исполнение на открытии
               следующего бара);
@@ -305,7 +305,7 @@ class BaseStrategy(ABC):
         take_profit: Optional[float] = None,
         risk_pct: Optional[float] = None,
         tag: str = "",
-    ) -> "Order":
+    ) -> Order:
         """Продажа (открытие шорта или разворот). Семантика как у buy();
         stop_price здесь -- sell-stop (исполнение при пробое уровня вниз)."""
         return self.broker.sell(
@@ -318,7 +318,7 @@ class BaseStrategy(ABC):
             tag=tag,
         )
 
-    def close_position(self, tag: str = "") -> Optional["Order"]:
+    def close_position(self, tag: str = "") -> Optional[Order]:
         """Закрыть текущую позицию рыночным ордером (если она есть)."""
         return self.broker.close_position(tag=tag)
 

@@ -45,7 +45,7 @@ class OrderSide(Enum):
     SELL = -1
 
     @property
-    def opposite(self) -> "OrderSide":
+    def opposite(self) -> OrderSide:
         return OrderSide.SELL if self is OrderSide.BUY else OrderSide.BUY
 
 
@@ -280,7 +280,7 @@ class Broker:
         if risk_pct is not None:
             if size is not None:
                 raise ValueError("size и risk_pct взаимоисключающие")
-            if not 0 < risk_pct:
+            if not risk_pct > 0:
                 raise ValueError("risk_pct должен быть положительным")
             if stop_loss is None:
                 raise ValueError(
@@ -332,13 +332,12 @@ class Broker:
                     raw = stop
                 else:
                     return None
+            elif bar.open <= stop:
+                raw = bar.open
+            elif bar.low <= stop:
+                raw = stop
             else:
-                if bar.open <= stop:
-                    raw = bar.open
-                elif bar.low <= stop:
-                    raw = stop
-                else:
-                    return None
+                return None
             return self._apply_spread(
                 self._apply_slippage(raw, order.side), order.side
             )
@@ -352,13 +351,12 @@ class Broker:
                 raw = limit
             else:
                 return None
+        elif bar.open >= limit:
+            raw = bar.open
+        elif bar.high >= limit:
+            raw = limit
         else:
-            if bar.open >= limit:
-                raw = bar.open
-            elif bar.high >= limit:
-                raw = limit
-            else:
-                return None
+            return None
         return self._apply_spread(raw, order.side)
 
     def _apply_slippage(self, price: float, side: OrderSide) -> float:
@@ -615,7 +613,7 @@ class BacktestResult:
             for t in self.trades
         )
 
-    def stats(self, periods_per_year: Optional[int] = None) -> "Any":
+    def stats(self, periods_per_year: Optional[int] = None) -> Any:
         """Расчёт метрик (см. metrics.compute_metrics)."""
         from .metrics import compute_metrics
 

@@ -106,11 +106,11 @@ class OptimizationResult:
     method: str = ""
     # DSR лучшего результата с поправкой на размер перебора; заполняется
     # вызывающим кодом (deflated_sharpe_from_optimization) после оптимизации.
-    deflated_sharpe: Optional["DeflatedSharpeResult"] = None
+    deflated_sharpe: Optional[DeflatedSharpeResult] = None
     # MinTRL и Haircut Sharpe лучшего результата (по тем же доходностям, что и
     # DSR) -- заполняются вызывающим кодом после оптимизации.
-    min_trl: Optional["MinTRLResult"] = None
-    haircut: Optional["HaircutSharpeResult"] = None
+    min_trl: Optional[MinTRLResult] = None
+    haircut: Optional[HaircutSharpeResult] = None
 
     def history_df(self) -> pd.DataFrame:
         """История всех испытаний: колонки параметров + score."""
@@ -246,7 +246,7 @@ class GridSearchOptimizer(BaseOptimizer):
     def optimize(self) -> OptimizationResult:
         names = list(self.param_grid)
         combos = list(product(*(self.param_grid[n] for n in names)))
-        param_dicts = [dict(zip(names, combo)) for combo in combos]
+        param_dicts = [dict(zip(names, combo, strict=True)) for combo in combos]
         if self.verbose:
             print(f"Grid Search: {len(combos)} комбинаций")
 
@@ -260,7 +260,7 @@ class GridSearchOptimizer(BaseOptimizer):
         else:
             scores = (self._evaluate(p) for p in param_dicts)
 
-        for k, (params, raw) in enumerate(zip(param_dicts, scores), start=1):
+        for k, (params, raw) in enumerate(zip(param_dicts, scores, strict=True), start=1):
             score = self._sanitize(raw)
             history.append((params, score))
             if self._is_better(score, best_score):
@@ -377,7 +377,7 @@ class GeneticOptimizer(BaseOptimizer):
                 scores = self.batch_evaluator.evaluate([ind for _, ind in fresh])
             else:
                 scores = [self._evaluate(ind) for _, ind in fresh]
-            for (key, ind), raw in zip(fresh, scores):
+            for (key, ind), raw in zip(fresh, scores, strict=True):
                 cache[key] = self._sanitize(raw)
                 history.append((ind, cache[key]))
 

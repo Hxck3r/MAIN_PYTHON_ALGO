@@ -11,7 +11,7 @@ STRATEGIES = {
     "KAMA Crossover (адаптивные Кауфмана)": KamaCrossStrategy,
 }
 
-__all__ = ["SmaCrossStrategy", "KamaCrossStrategy", "STRATEGIES"]
+__all__ = ["STRATEGIES", "KamaCrossStrategy", "SmaCrossStrategy"]
 
 # Сигнальные стратегии исполняются быстрым numba-ядром (десятки крат быстрее
 # на оптимизации/WFA). Регистрируются только если установлена numba -- иначе

@@ -209,7 +209,7 @@ class WalkForwardResult:
     avg_plateau_pct: float = math.nan        # средняя «ширина плато» оптимума, %
     # DSR сшитой OOS-кривой с поправкой на размер перебора в окне (n_trials):
     # значим ли OOS-Sharpe с учётом того, что оптимизатор отсеивал N кандидатов.
-    oos_dsr: Optional["DeflatedSharpeResult"] = None
+    oos_dsr: Optional[DeflatedSharpeResult] = None
 
     @property
     def n_windows(self) -> int:

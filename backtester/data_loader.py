@@ -82,7 +82,7 @@ class DataLoader:
     # ------------------------------------------------------------------ #
     def load_csv(
         self,
-        path: "str | Path | Any",
+        path: str | Path | Any,
         sep: Optional[str] = None,
         dropna: bool = True,
         validate_ohlc: bool = True,

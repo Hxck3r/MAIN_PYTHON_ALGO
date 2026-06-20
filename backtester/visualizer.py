@@ -104,7 +104,7 @@ def plot_backtest(
                 ),
                 text=[
                     f"PnL: {p:,.2f} ({r})"
-                    for p, r in zip(trades["pnl"], trades["exit_reason"])
+                    for p, r in zip(trades["pnl"], trades["exit_reason"], strict=True)
                 ],
                 hovertemplate="%{x}<br>Цена: %{y:.4f}<br>%{text}<extra></extra>",
             ),

@@ -134,12 +134,11 @@ class MLStrategy(BaseStrategy):
                     self._enter(-1, bar)  # разворот: неттинг закроет лонг и откроет шорт
                 else:
                     self.close_position(tag="ml_exit")
-        else:                             # короткая позиция
-            if p >= self._thr_hi:
-                if want_long:
-                    self._enter(+1, bar)
-                else:
-                    self.close_position(tag="ml_exit")
+        elif p >= self._thr_hi:
+            if want_long:
+                self._enter(+1, bar)
+            else:
+                self.close_position(tag="ml_exit")
 
     # ------------------------------------------------------------------ #
     def _size_fraction(self, bar: Bar) -> float:

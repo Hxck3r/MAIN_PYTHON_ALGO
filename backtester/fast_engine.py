@@ -102,7 +102,7 @@ class SignalStrategy(BaseStrategy):
 # ---------------------------------------------------------------------- #
 # Валидация сигналов и проверка причинности (анти-lookahead)
 # ---------------------------------------------------------------------- #
-def _validate_signal_arrays(strategy: "SignalStrategy") -> None:
+def _validate_signal_arrays(strategy: SignalStrategy) -> None:
     """Проверки сайзинга/SL для баров с сигналом -- зеркало Broker._submit.
 
     В быстром ядре NaN означает «не задано», поэтому ошибка в стратегии
@@ -133,7 +133,7 @@ def _validate_signal_arrays(strategy: "SignalStrategy") -> None:
 
 
 def _compute_signal_arrays(
-    strategy_cls: Type["SignalStrategy"],
+    strategy_cls: Type[SignalStrategy],
     data: pd.DataFrame,
     params: Optional[dict[str, Any]],
 ) -> dict[str, np.ndarray]:
@@ -147,7 +147,7 @@ def _compute_signal_arrays(
 
 
 def assert_no_lookahead(
-    strategy_cls: Type["SignalStrategy"],
+    strategy_cls: Type[SignalStrategy],
     data: pd.DataFrame,
     params: Optional[dict[str, Any]] = None,
     prefixes: tuple[float, ...] = (0.25, 0.5, 0.75),
@@ -265,10 +265,8 @@ def _run_kernel(
                 if pos_side != 0:
                     offset = pos_size if pos_side != side else -pos_size
                 cap = eq_pos * max_leverage / price + offset
-                if cap < 0.0:
-                    cap = 0.0
-                if size > cap:
-                    size = cap
+                cap = max(cap, 0.0)
+                size = min(size, cap)
 
             if size <= 0.0:
                 pend = 0

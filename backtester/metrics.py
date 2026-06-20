@@ -129,7 +129,7 @@ def max_drawdown_info(equity: pd.Series) -> tuple[float, float, int]:
     running_max = np.maximum.accumulate(values)
     duration = 0
     current = 0
-    for value, peak in zip(values, running_max):
+    for value, peak in zip(values, running_max, strict=True):
         current = 0 if value >= peak else current + 1
         duration = max(duration, current)
     return dd_abs, dd_pct, duration
@@ -183,6 +183,7 @@ def exposure_pct(trades_df: pd.DataFrame, n_bars: int) -> float:
         zip(
             trades_df["entry_bar"].to_numpy(dtype=np.int64),
             trades_df["exit_bar"].to_numpy(dtype=np.int64),
+            strict=True,
         )
     )
     covered = 0
