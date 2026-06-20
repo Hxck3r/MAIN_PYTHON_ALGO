@@ -3,15 +3,13 @@
 Чтобы новая стратегия появилась в GUI (desktop_app.py), добавьте её в STRATEGIES.
 """
 from .sma_cross import SmaCrossStrategy
-from .kama_cross import KamaCrossStrategy
 
 #: реестр стратегий: отображаемое имя -> класс
 STRATEGIES = {
     "SMA Crossover (пересечение скользящих)": SmaCrossStrategy,
-    "KAMA Crossover (адаптивные Кауфмана)": KamaCrossStrategy,
 }
 
-__all__ = ["STRATEGIES", "KamaCrossStrategy", "SmaCrossStrategy"]
+__all__ = ["STRATEGIES", "SmaCrossStrategy"]
 
 # Сигнальные стратегии исполняются быстрым numba-ядром (десятки крат быстрее
 # на оптимизации/WFA). Регистрируются только если установлена numba -- иначе
@@ -39,21 +37,3 @@ else:
 
     STRATEGIES["ML мета-модель (López de Prado)"] = MetaLabelStrategy
     __all__.append("MetaLabelStrategy")
-
-# TA Adaptive Trend Lite -- сигнальная (быстрое numba-ядро); регистрируется
-# только при установленной numba (как и прочие SignalStrategy выше).
-try:
-    from .adaptive_trend_lite import TAAdaptiveTrendLite
-except ImportError:
-    pass
-else:
-    STRATEGIES["TA Adaptive Trend Lite (быстрый, numba)"] = TAAdaptiveTrendLite
-    __all__.append("TAAdaptiveTrendLite")
-
-# TA Adaptive Trend (ATR + частичные закрытия) -- событийная стратегия,
-# работает без numba. Регистрируем ДОБАВЛЕНИЕМ ключа, а не переприсваиванием
-# STRATEGIES (иначе стёрли бы все стратегии, добавленные выше).
-from .adaptive_trend_atr import TAAdaptiveTrendATR  # noqa: E402
-
-STRATEGIES["TA Adaptive Trend (ATR + Частичные закрытия)"] = TAAdaptiveTrendATR
-__all__.append("TAAdaptiveTrendATR")
