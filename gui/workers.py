@@ -79,12 +79,17 @@ class BacktestWorker(QThread):
         strategy_params: dict[str, Any],
         engine_kwargs: dict[str, float],
         parent=None,
+        *,
+        market_features: pd.DataFrame | None = None,
+        footprint: pd.DataFrame | None = None,
     ) -> None:
         super().__init__(parent)
         self.data = data
         self.strategy_cls = strategy_cls
         self.strategy_params = strategy_params
         self.engine_kwargs = engine_kwargs
+        self.market_features = market_features
+        self.footprint = footprint
 
     def run(self) -> None:
         try:
@@ -92,6 +97,8 @@ class BacktestWorker(QThread):
                 data=self.data,
                 strategy_cls=self.strategy_cls,
                 strategy_params=self.strategy_params,
+                market_features=self.market_features,
+                footprint=self.footprint,
                 **self.engine_kwargs,
             ).run()
         except Exception as exc:
@@ -430,6 +437,75 @@ class WfaMatrixWorker(QThread):
             return
         except Exception as exc:
             self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit(result)
+
+
+# --------------------------------------------------------------------------- #
+# Тиковые данные (архивы бирж)
+# --------------------------------------------------------------------------- #
+class ArchiveDownloadWorker(QThread):
+    """Загрузка тиковых архивов бирж + сборка футпринта и свечей — в фоне.
+
+    Работа целиком выполняется в ``marketdata.archives`` (тот же код, что и у
+    команды ``algo-trades archive``), здесь только Qt-обвязка: прогресс, журнал
+    и кооперативная остановка. Остановка безопасна: уже загруженные дни
+    помечены в ``archives_state.json``, повторный запуск продолжит с места.
+    """
+
+    finished_ok = Signal(object)   # marketdata.archives.DatasetResult
+    failed = Signal(str)
+    stopped = Signal()             # загрузка прервана пользователем
+    progress = Signal(int, int)    # (сделано, всего) файлов архива
+    status = Signal(str)           # текстовый статус этапа
+    log = Signal(str)              # строка журнала
+
+    def __init__(self, request, parent=None) -> None:
+        super().__init__(parent)
+        self.request = request
+        self._stop = False
+        self._total = 0
+        self._done = 0
+
+    def stop(self) -> None:
+        """Запросить остановку; текущий файл дочитывается, состояние сохраняется."""
+        self._stop = True
+        self.requestInterruption()
+
+    def _should_stop(self) -> bool:
+        return self._stop or self.isInterruptionRequested()
+
+    def _on_progress(self, event) -> None:
+        from marketdata.archives import format_event
+
+        if event.event == "plan":
+            # Уже лежащие в хранилище файлы работы не требуют.
+            self._total += max(event.total - event.done, 0)
+        elif event.event == "file":
+            self._done += 1
+            self._total = max(self._total, self._done)
+        if self._total:
+            self.progress.emit(min(self._done, self._total), self._total)
+        line = format_event(event)
+        if line:
+            self.log.emit(line)
+
+    def run(self) -> None:
+        from marketdata.archives import ArchiveCancelled
+
+        try:
+            self.status.emit("Загрузка архивов...")
+            result = self.request.download(
+                progress=self._on_progress, should_stop=self._should_stop
+            )
+        except ArchiveCancelled:
+            self.stopped.emit()
+            return
+        except Exception as exc:  # noqa: BLE001 - в GUI показываем текст ошибки
+            self.failed.emit(str(exc))
+            return
+        if result.cancelled:
+            self.stopped.emit()
             return
         self.finished_ok.emit(result)
 

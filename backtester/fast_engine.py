@@ -445,6 +445,8 @@ def run_fast_backtest(
     max_leverage: Optional[float] = None,
     default_size_pct: float = 0.95,
     warmup_bars: int = 0,
+    market_features: pd.DataFrame | None = None,
+    footprint: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Прогон сигнальной стратегии через numba-ядро.
 
@@ -463,17 +465,33 @@ def run_fast_backtest(
     if warmup_bars < 0 or warmup_bars >= len(data):
         raise ValueError("warmup_bars должен быть в диапазоне [0, len(data))")
 
+    # Reuse the event-driven engine's alignment rules so feature columns are
+    # available during init()/compute_signals while the candle index is kept.
+    aligned = data.copy()
+    if market_features is not None:
+        aligned = aligned.join(
+            BacktestEngine._align_external_frame(market_features, aligned.index),
+            how="left",
+            suffixes=("", "_market"),
+        )
+    if footprint is not None and isinstance(footprint.index, pd.DatetimeIndex):
+        aligned = aligned.join(
+            BacktestEngine._align_external_frame(footprint, aligned.index),
+            how="left",
+            suffixes=("", "_footprint"),
+        )
+
     strategy = strategy_cls(**(strategy_params or {}))
-    strategy._bind(None, data)  # broker не нужен: next() в быстром пути не зовётся
+    strategy._bind(None, aligned)  # broker не нужен: next() в быстром пути не зовётся
     strategy.init()
     _validate_signal_arrays(strategy)
 
-    index = data.index
+    index = aligned.index
     out = _run_kernel(
-        data["open"].to_numpy(np.float64),
-        data["high"].to_numpy(np.float64),
-        data["low"].to_numpy(np.float64),
-        data["close"].to_numpy(np.float64),
+        aligned["open"].to_numpy(np.float64),
+        aligned["high"].to_numpy(np.float64),
+        aligned["low"].to_numpy(np.float64),
+        aligned["close"].to_numpy(np.float64),
         strategy._sig, strategy._sl, strategy._tp, strategy._size, strategy._risk,
         float(cash), float(commission_pct), float(commission_fixed),
         float(slippage_pct), float(spread_pct),
@@ -511,9 +529,11 @@ def run_fast_backtest(
         equity_curve=pd.Series(equity, index=index, name="equity"),
         trades=trades,
         orders=[],
-        data=data,
+        data=aligned,
         initial_cash=float(cash),
         strategy_name=strategy_cls.__name__,
         strategy_params=dict(strategy.p),
         indicators=list(getattr(strategy, "_plots", [])),
+        market_features=strategy.full_features.copy(),
+        footprint=footprint,
     )

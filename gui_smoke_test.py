@@ -41,7 +41,9 @@ def wait_worker(app: QApplication, window: MainWindow, timeout_s: float = 120) -
 
 
 def main() -> None:
-    app = QApplication([])
+    # Переиспользуем singleton, если он уже создан (например, pytest-сессией):
+    # второй QApplication поднимать нельзя.
+    app = QApplication.instance() or QApplication([])
     window = MainWindow()
     window.show()
     app.processEvents()

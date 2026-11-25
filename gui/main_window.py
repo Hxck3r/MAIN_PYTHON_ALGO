@@ -58,6 +58,8 @@ from backtester import (
 )
 from backtester.metrics import CRITERIA
 from strategies import STRATEGIES
+from marketdata import bar_features_from_footprint
+from marketdata.archives import DEFAULT_DATA_DIR
 
 from .chart_widget import ChartWidget
 from .mc_panel import McPanel
@@ -67,6 +69,7 @@ from .pbo_panel import PboPanel
 from .param_table import ParamTable
 from .result_charts import ResultChartsPanel
 from .results_panel import MetricsTable, OptimizationTable, TradesTable
+from .tick_data import TickDataDialog
 from .wfa_matrix_panel import WfaMatrixPanel
 from .wfa_panel import WfaPanel
 from .workers import (
@@ -80,6 +83,11 @@ from .workers import (
 )
 
 
+def _prepare_marketdata_features(footprint: pd.DataFrame) -> pd.DataFrame:
+    """Bar-aligned order-flow features from footprint cells (see marketdata)."""
+    return bar_features_from_footprint(footprint)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -87,6 +95,8 @@ class MainWindow(QMainWindow):
         self.resize(1500, 950)
 
         self._data: Optional[pd.DataFrame] = None        # полные данные
+        self._market_features: Optional[pd.DataFrame] = None
+        self._footprint: Optional[pd.DataFrame] = None
         self._worker: Optional[Any] = None               # активный поток
         self._last_opt: Optional[OptimizationResult] = None
         self._last_result: Optional[BacktestResult] = None  # для Монте-Карло
@@ -154,6 +164,11 @@ class MainWindow(QMainWindow):
         self.radio_synth.setChecked(True)
         self.btn_open_csv = QPushButton("Открыть CSV...")
         self.btn_open_csv.clicked.connect(self._open_csv)
+        self.btn_open_marketdata = QPushButton("Открыть footprint Parquet...")
+        self.btn_open_marketdata.clicked.connect(self._open_marketdata)
+        # Скачивание тиковых архивов бирж и сборка футпринта -- прямо из тестера.
+        self.btn_tick_data = QPushButton("Скачать тиковые данные (архивы)...")
+        self.btn_tick_data.clicked.connect(self._open_tick_data)
         self.lbl_data = QLabel("—")
         self.lbl_data.setWordWrap(True)
 
@@ -168,6 +183,8 @@ class MainWindow(QMainWindow):
 
         data_layout.addWidget(self.radio_csv)
         data_layout.addWidget(self.btn_open_csv)
+        data_layout.addWidget(self.btn_open_marketdata)
+        data_layout.addWidget(self.btn_tick_data)
         data_layout.addWidget(self.radio_synth)
         data_layout.addLayout(synth_form)
         data_layout.addWidget(self.btn_generate)
@@ -473,6 +490,80 @@ class MainWindow(QMainWindow):
         self.chart.show_data(df)
         self._log(f"Данные загружены: {label} ({len(df)} баров)")
 
+    def _open_marketdata(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Выберите footprint Parquet", "", "Parquet (*.parquet);;Все файлы (*)"
+        )
+        if paths:
+            self.load_marketdata_files(paths)
+
+    def load_marketdata_files(self, paths) -> bool:
+        """Загрузить footprint из Parquet-файлов; True, если данные приняты.
+
+        Отделено от диалога, чтобы этот путь можно было прогнать в smoke-тесте.
+        """
+        self._market_features = None
+        self._footprint = None
+        try:
+            footprint = pd.concat([pd.read_parquet(path) for path in paths]).sort_index()
+            if not isinstance(footprint.index, pd.MultiIndex):
+                raise ValueError("Footprint Parquet должен иметь MultiIndex bar_start/price_level")
+            names = list(footprint.index.names)
+            if names != ["bar_start", "price_level"]:
+                raise ValueError("Индекс footprint должен быть (bar_start, price_level)")
+            self._footprint = footprint
+            self._market_features = _prepare_marketdata_features(footprint)
+            self._log(f"Footprint загружен: {len(footprint):,} price cells")
+            return True
+        except Exception as exc:
+            self._market_features = None
+            self._footprint = None
+            QMessageBox.critical(self, "Ошибка загрузки footprint", str(exc))
+            return False
+
+    # ------------------------------------------------------------------ #
+    # Тиковые данные: архивы бирж -> футпринт + свечи
+    # ------------------------------------------------------------------ #
+    def _open_tick_data(self) -> None:
+        """Диалог загрузки архивов; результат сразу становится данными теста."""
+        dialog = TickDataDialog(
+            self,
+            data_dir=getattr(self, "_marketdata_dir", DEFAULT_DATA_DIR),
+            symbol=getattr(self, "_tick_symbol", "BTC/USDT:USDT"),
+        )
+        dialog.loaded.connect(self._apply_dataset)
+        dialog.exec()
+        # Запоминаем выбор, чтобы следующее открытие диалога начиналось с него.
+        request = dialog.build_request()
+        self._marketdata_dir = request.data_dir
+        self._tick_symbol = request.symbol
+
+    def _apply_dataset(self, result) -> None:
+        """Открыть скачанные свечи и футпринт в тестере.
+
+        Свечи дают бары для движка, футпринт -- рыночные признаки для стратегии
+        и тепловую карту на графике. Пара «таймфрейм футпринта == интервал свечей»
+        проверяется при запуске загрузки, иначе признаки не совпали бы с барами.
+        """
+        label = "архивы бирж"
+        if result.candles is not None and not result.candles.empty:
+            self.radio_csv.setChecked(True)
+            self._set_data(result.candles, f"{label} (свечи Binance)")
+        else:
+            self._log("Свечи не скачаны: бары для бэктеста не изменились")
+        if result.footprint is not None and not result.footprint.empty:
+            if self.load_marketdata_files([result.footprint_path]):
+                cells = len(self._footprint)
+                bars = self._footprint.index.get_level_values("bar_start").nunique()
+                self._log(f"Футпринт готов: {cells:,} ячеек, {bars:,} баров")
+                # Тепловая карта -- это прямоугольник на каждую ячейку, поэтому
+                # очень большой футпринт рисуем только по кнопке «Бэктест»
+                # (там график всё равно перерисовывается по результату).
+                if cells <= 20_000:
+                    self.chart.show_footprint(self._footprint)
+                else:
+                    self._log("Футпринт большой: тепловая карта появится после бэктеста")
+
     def _generate_synthetic(self) -> None:
         self.radio_synth.setChecked(True)
         df = generate_synthetic_data(
@@ -529,6 +620,7 @@ class MainWindow(QMainWindow):
     def _set_busy(self, busy: bool, message: str = "") -> None:
         self.btn_backtest.setEnabled(not busy)
         self.btn_optimize.setEnabled(not busy)
+        self.btn_tick_data.setEnabled(not busy)
         self.btn_wfa.setEnabled(not busy)
         self.btn_wfa_matrix.setEnabled(not busy)
         self.btn_mc.setEnabled(not busy)
@@ -601,7 +693,13 @@ class MainWindow(QMainWindow):
         self._set_busy(True, "Бэктест...")
         self._log(f"Бэктест: {self._strategy_cls().__name__} {params}")
         self._worker = BacktestWorker(
-            data, self._strategy_cls(), params, self._engine_kwargs(), parent=self
+            data,
+            self._strategy_cls(),
+            params,
+            self._engine_kwargs(),
+            market_features=self._market_features,
+            footprint=self._footprint,
+            parent=self,
         )
         self._worker.finished_ok.connect(self._on_backtest_done)
         self._worker.failed.connect(self._on_failed)

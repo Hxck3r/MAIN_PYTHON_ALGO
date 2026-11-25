@@ -198,6 +198,22 @@ class BaseStrategy(ABC):
         assert self._data is not None, "Стратегия не привязана к движку"
         return self._data
 
+    @property
+    def full_features(self) -> pd.DataFrame:
+        """Полные дополнительные признаки DataFrame для расчёта в init()."""
+        return self.data.drop(columns=["open", "high", "low", "close", "volume"], errors="ignore")
+
+    @property
+    def features(self) -> pd.DataFrame:
+        """Дополнительные признаки только до текущего бара (включительно)."""
+        return self.full_features.iloc[: self._i + 1]
+
+    def feature(self, name: str) -> np.ndarray:
+        """Текущие и прошлые значения дополнительной колонки, без lookahead."""
+        if name not in self.full_features.columns:
+            raise KeyError(f"Unknown feature: {name}")
+        return self.full_features[name].to_numpy()[: self._i + 1]
+
     # Срезы «по текущий бар включительно» -- безопасны от lookahead в next()
     @property
     def open(self) -> np.ndarray:

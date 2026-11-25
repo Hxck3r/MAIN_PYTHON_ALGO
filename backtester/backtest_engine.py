@@ -572,6 +572,9 @@ class BacktestResult:
     #: объявляет. default_factory -- чтобы старый код, строящий BacktestResult
     #: без этого поля, не падал.
     indicators: list[dict[str, Any]] = field(default_factory=list)
+    #: опциональные order-flow/footprint данные, выровненные по барам.
+    market_features: pd.DataFrame | None = None
+    footprint: pd.DataFrame | None = None
 
     @property
     def final_equity(self) -> float:
@@ -655,6 +658,8 @@ class BacktestEngine:
         max_leverage: Optional[float] = None,
         default_size_pct: float = 0.95,
         warmup_bars: int = 0,
+        market_features: pd.DataFrame | None = None,
+        footprint: pd.DataFrame | None = None,
     ) -> None:
         """warmup_bars: первые N баров стратегия не вызывается (торговли нет),
         но индикаторы в init() считаются по всему срезу -- к началу торговли
@@ -676,6 +681,43 @@ class BacktestEngine:
             max_leverage=max_leverage,
             default_size_pct=default_size_pct,
         )
+        self.market_features = market_features
+        self.footprint = footprint
+        # Align bar-indexed external features without changing the candle index.
+        # A candle loader may return a naive UTC index while marketdata uses an
+        # explicit UTC index; pandas refuses to join those index types directly.
+        aligned = data.copy()
+        if market_features is not None:
+            aligned = aligned.join(
+                self._align_external_frame(market_features, aligned.index),
+                how="left",
+                suffixes=("", "_market"),
+            )
+        # A footprint is normally a (bar, price) MultiIndex for visualization,
+        # not a bar-indexed feature table. Join it only when already bar-indexed.
+        if footprint is not None and isinstance(footprint.index, pd.DatetimeIndex):
+            aligned = aligned.join(
+                self._align_external_frame(footprint, aligned.index),
+                how="left",
+                suffixes=("", "_footprint"),
+            )
+        self.data = aligned
+
+    @staticmethod
+    def _align_external_frame(frame: pd.DataFrame, target: pd.Index) -> pd.DataFrame:
+        """Normalize a bar-indexed feature frame to the candle index timezone."""
+        if not isinstance(frame.index, pd.DatetimeIndex):
+            raise TypeError("External features must use a DatetimeIndex")
+        out = frame.copy()
+        source = pd.DatetimeIndex(pd.to_datetime(out.index, utc=True))
+        if isinstance(target, pd.DatetimeIndex) and target.tz is None:
+            source = source.tz_localize(None)
+        elif isinstance(target, pd.DatetimeIndex) and target.tz is not None:
+            source = source.tz_convert(target.tz)
+        out.index = source
+        if not out.index.is_unique:
+            out = out[~out.index.duplicated(keep="last")]
+        return out
 
     @staticmethod
     def _validate_data(data: pd.DataFrame) -> None:
@@ -736,6 +778,8 @@ class BacktestEngine:
             strategy_name=self.strategy_cls.__name__,
             strategy_params=dict(strategy.p),
             indicators=list(getattr(strategy, "_plots", [])),
+            market_features=strategy.full_features.copy(),
+            footprint=self.footprint,
         )
 
 

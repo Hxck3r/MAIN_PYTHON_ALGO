@@ -1,0 +1,38 @@
+{
+  "downloads": [
+    {
+      "at": "2026-11-25T20:44:32+03:00",
+      "contract_size": null,
+      "exchange": "binance",
+      "incomplete_buckets": [],
+      "malformed_rows": 0,
+      "pages": 7,
+      "rows_fetched": 18071253,
+      "rows_written": 18071253,
+      "symbol": "BTC/USDT:USDT"
+    }
+  ],
+  "files": [
+    "canonical/exchange=binance/symbol=BTC_USDT_USDT/date=2026-11-18/trades.parquet",
+    "canonical/exchange=binance/symbol=BTC_USDT_USDT/date=2026-11-19/trades.parquet",
+    "canonical/exchange=binance/symbol=BTC_USDT_USDT/date=2026-11-20/trades.parquet",
+    "canonical/exchange=binance/symbol=BTC_USDT_USDT/date=2026-11-21/trades.parquet",
+    "canonical/exchange=binance/symbol=BTC_USDT_USDT/date=2026-11-22/trades.parquet",
+    "canonical/exchange=binance/symbol=BTC_USDT_USDT/date=2026-11-23/trades.parquet",
+    "canonical/exchange=binance/symbol=BTC_USDT_USDT/date=2026-11-24/trades.parquet"
+  ],
+  "last_validation": {
+    "duplicates_removed": 0,
+    "invalid_rows_removed": 0,
+    "rows_input": 951507,
+    "rows_valid": 951507
+  },
+  "metadata": {
+    "archive_dataset": "aggTrades",
+    "exchange": "binance",
+    "source": "exchange_archive",
+    "symbol": "BTC/USDT:USDT",
+    "time_unit": "UTC"
+  },
+  "schema_version": 1
+}

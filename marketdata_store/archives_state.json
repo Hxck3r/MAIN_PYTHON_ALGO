@@ -1,0 +1,51 @@
+{
+  "binance:BTC/USDT:USDT:2026-11-18": {
+    "at": "2026-11-25T17:42:59+00:00",
+    "complete": true,
+    "dataset": "aggTrades",
+    "instrument": "BTCUSDT",
+    "rows": 1677359
+  },
+  "binance:BTC/USDT:USDT:2026-11-19": {
+    "at": "2026-11-25T17:43:08+00:00",
+    "complete": true,
+    "dataset": "aggTrades",
+    "instrument": "BTCUSDT",
+    "rows": 1990886
+  },
+  "binance:BTC/USDT:USDT:2026-11-20": {
+    "at": "2026-11-25T17:43:46+00:00",
+    "complete": true,
+    "dataset": "aggTrades",
+    "instrument": "BTCUSDT",
+    "rows": 3312646
+  },
+  "binance:BTC/USDT:USDT:2026-11-21": {
+    "at": "2026-11-25T17:44:07+00:00",
+    "complete": true,
+    "dataset": "aggTrades",
+    "instrument": "BTCUSDT",
+    "rows": 3738122
+  },
+  "binance:BTC/USDT:USDT:2026-11-22": {
+    "at": "2026-11-25T17:43:23+00:00",
+    "complete": true,
+    "dataset": "aggTrades",
+    "instrument": "BTCUSDT",
+    "rows": 1938586
+  },
+  "binance:BTC/USDT:USDT:2026-11-23": {
+    "at": "2026-11-25T17:44:32+00:00",
+    "complete": true,
+    "dataset": "aggTrades",
+    "instrument": "BTCUSDT",
+    "rows": 2951507
+  },
+  "binance:BTC/USDT:USDT:2026-11-24": {
+    "at": "2026-11-25T17:44:18+00:00",
+    "complete": true,
+    "dataset": "aggTrades",
+    "instrument": "BTCUSDT",
+    "rows": 2462147
+  }
+}

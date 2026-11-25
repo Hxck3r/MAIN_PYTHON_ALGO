@@ -79,6 +79,17 @@ def make_grid_item() -> pg.GridItem:
     return grid
 
 
+def _coordinate_edges(values: np.ndarray, fallback_step: float) -> np.ndarray:
+    """Infer cell edges from centers without stretching irregular gaps."""
+    values = np.asarray(values, dtype=float)
+    if len(values) == 1:
+        half = fallback_step / 2
+        return np.array([values[0] - half, values[0] + half])
+    mids = (values[:-1] + values[1:]) / 2
+    return np.concatenate(([values[0] - (mids[0] - values[0])], mids,
+                           [values[-1] + (values[-1] - mids[-1])]))
+
+
 class ChartWidget(QWidget):
     """Две панели в сплиттере: цена со сделками (сверху) и эквити (снизу)."""
 
@@ -130,6 +141,52 @@ class ChartWidget(QWidget):
         self._plot_overlays(df, indicators)
         fplt.refresh()
 
+    def show_footprint(self, footprint: pd.DataFrame, value: str | None = None) -> None:
+        """Draw a time/price footprint heatmap on the price panel."""
+        if footprint.empty:
+            return
+        if value is None:
+            value = "combined_delta" if "combined_delta" in footprint.columns else "delta"
+        if value not in footprint.columns:
+            return
+        frame = footprint.reset_index()
+        time_col = "bar_start" if "bar_start" in frame else "bar"
+        if "price_level" not in frame or time_col not in frame:
+            raise ValueError("Footprint needs bar_start/bar and price_level columns")
+        # Overlapping partitions (same bar loaded twice) must not draw or
+        # colour-count the same cell twice.
+        frame = frame.drop_duplicates(subset=[time_col, "price_level"], keep="last")
+        times = pd.to_datetime(frame[time_col], utc=True)
+        levels = pd.to_numeric(frame["price_level"], errors="raise")
+        values = pd.to_numeric(frame[value], errors="coerce")
+        x_values = pd.DatetimeIndex(times).sort_values().unique()
+        x_codes = pd.Categorical(times, categories=x_values, ordered=True).codes
+        y_values = np.sort(levels.unique())
+        y_codes = pd.Categorical(levels, categories=y_values, ordered=True).codes
+        x_seconds = x_values.asi8.astype(np.float64) / 1_000_000_000
+        # ImageItem uses a single affine rectangle, so it cannot represent
+        # nonuniform cells. Draw actual rectangles at each timestamp/price cell.
+        x_edges = _coordinate_edges(x_seconds, 60.0)
+        y_edges = _coordinate_edges(y_values.astype(float), 1.0)
+        colormap = pg.colormap.get("CET-D1A")
+        finite = values[np.isfinite(values.to_numpy(dtype=float))]
+        low, high = (float(finite.min()), float(finite.max())) if len(finite) else (0.0, 1.0)
+        span = high - low or 1.0
+        for (x_code, y_code), cell_value in zip(zip(x_codes, y_codes), values):
+            if pd.isna(cell_value):
+                continue
+            color = colormap.map((float(cell_value) - low) / span, mode="byte")
+            item = pg.QtWidgets.QGraphicsRectItem(
+                float(x_edges[x_code]), float(y_edges[y_code]),
+                float(x_edges[x_code + 1] - x_edges[x_code]),
+                float(y_edges[y_code + 1] - y_edges[y_code]),
+            )
+            item.setPen(pg.mkPen(None))
+            item.setBrush(pg.mkBrush(color))
+            item.setZValue(-10)          # под свечами и линиями
+            self.ax_price.addItem(item)
+        fplt.refresh()
+
     def show_result(self, result: BacktestResult) -> None:
         """Свечи + индикаторы + маркеры сделок + связки вход-выход + эквити."""
         self.clear()
@@ -139,6 +196,9 @@ class ChartWidget(QWidget):
         )
         # Оверлеи индикаторов рисуем сразу после свечей -- маркеры сделок лягут поверх
         self._plot_overlays(df, getattr(result, "indicators", None))
+        footprint = getattr(result, "footprint", None)
+        if footprint is not None:
+            self.show_footprint(footprint)
 
         trades = result.trades_df()
         if not trades.empty:

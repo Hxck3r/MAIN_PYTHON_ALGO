@@ -16,6 +16,11 @@ models/
 # Исторические данные (не храним в git)
 data/
 
+# Сырое локальное хранилище тиков/свечей (сотни МБ): в git едут только
+# компактные производные артефакты (marketdata_store/footprint/)
+marketdata_store/canonical/
+marketdata_store/raw/
+
 # Локальные настройки инструментов
 .claude/settings.local.json
 

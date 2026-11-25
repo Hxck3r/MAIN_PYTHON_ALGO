@@ -3,13 +3,20 @@
 Чтобы новая стратегия появилась в GUI (desktop_app.py), добавьте её в STRATEGIES.
 """
 from .sma_cross import SmaCrossStrategy
+from .footprint_delta import FootprintDeltaStrategy
+from .footprint_imbalance import FootprintImbalanceStrategy
 
 #: реестр стратегий: отображаемое имя -> класс
 STRATEGIES = {
     "SMA Crossover (пересечение скользящих)": SmaCrossStrategy,
+    "Footprint delta (event-driven)": FootprintDeltaStrategy,
+    "Footprint imbalance + absorption (order flow)": FootprintImbalanceStrategy,
 }
 
-__all__ = ["STRATEGIES", "SmaCrossStrategy"]
+__all__ = [
+    "STRATEGIES", "SmaCrossStrategy", "FootprintDeltaStrategy",
+    "FootprintImbalanceStrategy",
+]
 
 # Сигнальные стратегии исполняются быстрым numba-ядром (десятки крат быстрее
 # на оптимизации/WFA). Регистрируются только если установлена numba -- иначе
