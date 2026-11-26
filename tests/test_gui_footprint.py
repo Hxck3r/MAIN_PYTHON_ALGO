@@ -55,6 +55,20 @@ def _wait(app, window, timeout_s: float = 120.0) -> None:
     raise TimeoutError("воркер не завершился за отведённое время")
 
 
+def _wait_footprint(app, window, timeout_s: float = 120.0) -> None:
+    """Дождаться фоновой загрузки footprint (read_parquet + признаки)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        app.processEvents()
+        worker = window._footprint_worker
+        if worker is None or not worker.isRunning():
+            for _ in range(30):
+                app.processEvents()
+            return
+        time.sleep(0.02)
+    raise TimeoutError("загрузка footprint не завершилась за отведённое время")
+
+
 @pytest.fixture
 def window(monkeypatch):
     """Окно в offscreen-режиме; модальные диалоги собираются в ``window.dialogs``."""
@@ -114,6 +128,62 @@ def test_footprint_loads_drives_strategy_and_draws_heatmap(window, tmp_path) -> 
         if isinstance(item, QtWidgets.QGraphicsRectItem)
     ]
     assert rectangles, "футпринт не отрисован на графике"
+
+
+def test_large_footprint_is_not_drawn_after_backtest(window) -> None:
+    """Выше предела ячеек теплокарта не рисуется -- иначе окно висит минуты.
+
+    На каждую ячейку создаётся QGraphicsRectItem: 20 000 ячеек = ~2.7 с, а
+    1-минутный футпринт за месяцы (753k) -- минуты в главном потоке.
+    """
+    import numpy as np
+    from pyqtgraph import QtWidgets
+
+    from backtester import BacktestEngine
+    from gui.chart_widget import MAX_FOOTPRINT_CELLS
+    from strategies import STRATEGIES
+
+    bars = window._data.index[:60]
+    n_levels = MAX_FOOTPRINT_CELLS // len(bars) + 2       # заведомо выше предела
+    footprint = pd.DataFrame(
+        {"buy": 1.0, "sell": 0.5, "delta": 0.5},
+        index=pd.MultiIndex.from_arrays(
+            [np.repeat(bars, n_levels), np.tile(np.arange(n_levels, dtype=float), len(bars))],
+            names=["bar_start", "price_level"],
+        ),
+    )
+    assert len(footprint) > MAX_FOOTPRINT_CELLS
+
+    result = BacktestEngine(
+        window._data, STRATEGIES["SMA Crossover (пересечение скользящих)"],
+        strategy_params={},
+        footprint=footprint,
+    ).run()
+    window.chart.show_result(result)
+
+    rectangles = [
+        item for item in window.chart.ax_price.items
+        if isinstance(item, QtWidgets.QGraphicsRectItem)
+    ]
+    assert not rectangles, "футпринт выше предела не должен рисоваться"
+
+
+def test_async_footprint_load_does_not_block_the_caller(window, tmp_path) -> None:
+    """Запуск чтения возвращается сразу: работа идёт в фоновом потоке."""
+    index = window._data.index[:60]
+    footprint = aggregate_footprint(
+        _synthetic_trades(index), timeframe="1h", price_step=1.0
+    )
+    path = tmp_path / "footprint.parquet"
+    footprint.to_parquet(path)
+
+    assert window.load_marketdata_files_async([str(path)]) is True
+    assert window._footprint_worker is not None, "работа должна идти в отдельном потоке"
+    assert window._footprint is None, "данные приходят сигналом, а не синхронно"
+
+    _wait_footprint(_APP, window)
+    assert window._footprint is not None
+    assert "rolling_delta" in window._market_features.columns
 
 
 def test_broken_footprint_file_leaves_no_partial_state(window, tmp_path) -> None:
@@ -308,6 +378,7 @@ def test_tick_dialog_reports_worker_progress_and_loaded_result(
 
     # Сводка того же объекта попадает и в журнал главного окна.
     window._apply_dataset(result)
+    _wait_footprint(app, window)          # футпринт читается в фоне
     assert window._footprint is not None
     assert "poc_price" in window._market_features.columns
     assert len(window._data) == len(result.candles)
@@ -317,6 +388,7 @@ def test_downloaded_dataset_opens_the_order_flow_strategy(window, tmp_path) -> N
     """Скачанные свечи + футпринт запускают ордерфлоу-стратегию из GUI."""
     result, _features = _dataset_result(tmp_path)
     window._apply_dataset(result)
+    _wait_footprint(_APP, window)         # read_parquet + признаки -- в фоне
 
     from pyqtgraph import QtWidgets
 

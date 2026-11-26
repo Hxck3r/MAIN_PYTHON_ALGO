@@ -58,10 +58,10 @@ from backtester import (
 )
 from backtester.metrics import CRITERIA
 from strategies import STRATEGIES
-from marketdata import bar_features_from_footprint
 from marketdata.archives import DEFAULT_DATA_DIR
 
-from .chart_widget import ChartWidget
+from .chart_widget import MAX_FOOTPRINT_CELLS, ChartWidget
+from .footprint_loader import footprint_features, read_footprint
 from .mc_panel import McPanel
 from .ml_panel import MlPanel
 from .opt_charts import OptimizationChartsPanel
@@ -74,6 +74,7 @@ from .wfa_matrix_panel import WfaMatrixPanel
 from .wfa_panel import WfaPanel
 from .workers import (
     BacktestWorker,
+    FootprintLoadWorker,
     MlTrainingWorker,
     MonteCarloWorker,
     OptimizationWorker,
@@ -81,11 +82,6 @@ from .workers import (
     WalkForwardWorker,
     WfaMatrixWorker,
 )
-
-
-def _prepare_marketdata_features(footprint: pd.DataFrame) -> pd.DataFrame:
-    """Bar-aligned order-flow features from footprint cells (see marketdata)."""
-    return bar_features_from_footprint(footprint)
 
 
 class MainWindow(QMainWindow):
@@ -98,6 +94,8 @@ class MainWindow(QMainWindow):
         self._market_features: Optional[pd.DataFrame] = None
         self._footprint: Optional[pd.DataFrame] = None
         self._worker: Optional[Any] = None               # активный поток
+        #: поток чтения footprint (отдельный: им нельзя управлять кнопкой «Стоп»)
+        self._footprint_worker: Optional[FootprintLoadWorker] = None
         self._last_opt: Optional[OptimizationResult] = None
         self._last_result: Optional[BacktestResult] = None  # для Монте-Карло
         self._last_wfa: Optional[WalkForwardResult] = None       # для ИИ-контекста
@@ -495,31 +493,77 @@ class MainWindow(QMainWindow):
             self, "Выберите footprint Parquet", "", "Parquet (*.parquet);;Все файлы (*)"
         )
         if paths:
-            self.load_marketdata_files(paths)
+            self.load_marketdata_files_async(paths)
 
     def load_marketdata_files(self, paths) -> bool:
-        """Загрузить footprint из Parquet-файлов; True, если данные приняты.
+        """Загрузить footprint из Parquet-файлов синхронно; True, если приняты.
 
-        Отделено от диалога, чтобы этот путь можно было прогнать в smoke-тесте.
+        Синхронный путь оставлен для тестов и скриптов: на 1-минутном футпринте
+        за месяцы признаки ордерфлоу считаются ~50 с, поэтому GUI пользуется
+        :meth:`load_marketdata_files_async` и не блокирует главный поток.
         """
         self._market_features = None
         self._footprint = None
         try:
-            footprint = pd.concat([pd.read_parquet(path) for path in paths]).sort_index()
-            if not isinstance(footprint.index, pd.MultiIndex):
-                raise ValueError("Footprint Parquet должен иметь MultiIndex bar_start/price_level")
-            names = list(footprint.index.names)
-            if names != ["bar_start", "price_level"]:
-                raise ValueError("Индекс footprint должен быть (bar_start, price_level)")
-            self._footprint = footprint
-            self._market_features = _prepare_marketdata_features(footprint)
-            self._log(f"Footprint загружен: {len(footprint):,} price cells")
-            return True
+            footprint = read_footprint(paths)
+            features = footprint_features(footprint)
         except Exception as exc:
-            self._market_features = None
-            self._footprint = None
             QMessageBox.critical(self, "Ошибка загрузки footprint", str(exc))
             return False
+        self._set_footprint_data(footprint, features)
+        return True
+
+    def load_marketdata_files_async(self, paths) -> bool:
+        """То же, что :meth:`load_marketdata_files`, но в фоновом потоке.
+
+        Чтение Parquet и ``bar_features_from_footprint`` -- десятки секунд на
+        большом футпринте; в GUI-потоке это «зависание» окна с точки зрения ОС.
+        """
+        if self._footprint_worker is not None and self._footprint_worker.isRunning():
+            return False
+        self._market_features = None
+        self._footprint = None
+        self._set_busy(True, "Чтение футпринта...", stoppable=False)
+        worker = FootprintLoadWorker(paths, parent=self)
+        worker.status.connect(lambda text: self.statusBar().showMessage(text))
+        worker.finished_ok.connect(self._on_footprint_loaded)
+        worker.failed.connect(self._on_footprint_failed)
+        self._footprint_worker = worker
+        worker.start()
+        return True
+
+    def _on_footprint_loaded(self, payload) -> None:
+        footprint, features = payload
+        self._footprint_worker = None
+        self._set_busy(False)
+        self._set_footprint_data(footprint, features)
+        cells = len(footprint)
+        bars = footprint.index.get_level_values("bar_start").nunique()
+        self._log(f"Футпринт готов: {cells:,} ячеек, {bars:,} баров")
+        # Тепловая карта -- прямоугольник на каждую ячейку; выше предела
+        # отрисовка занимает минуты, поэтому её пропускаем осознанно.
+        if cells <= MAX_FOOTPRINT_CELLS:
+            self.chart.show_footprint(footprint)
+        else:
+            self._log(
+                f"Тепловая карта не рисуется: {cells:,} ячеек больше предела "
+                f"{MAX_FOOTPRINT_CELLS:,} (иначе окно подвиснет на минуты). "
+                "Признаки ордерфлоу посчитаны и доступны стратегии."
+            )
+
+    def _on_footprint_failed(self, message: str) -> None:
+        self._footprint_worker = None
+        self._set_busy(False)
+        self._market_features = None
+        self._footprint = None
+        self._log(f"ОШИБКА загрузки footprint: {message}")
+        QMessageBox.critical(self, "Ошибка загрузки footprint", message)
+
+    def _set_footprint_data(self, footprint: pd.DataFrame, features: pd.DataFrame) -> None:
+        """Принять готовый футпринт и его признаки (общий хвост обоих путей)."""
+        self._footprint = footprint
+        self._market_features = features
+        self._log(f"Footprint загружен: {len(footprint):,} price cells")
 
     # ------------------------------------------------------------------ #
     # Тиковые данные: архивы бирж -> футпринт + свечи
@@ -552,17 +596,8 @@ class MainWindow(QMainWindow):
         else:
             self._log("Свечи не скачаны: бары для бэктеста не изменились")
         if result.footprint is not None and not result.footprint.empty:
-            if self.load_marketdata_files([result.footprint_path]):
-                cells = len(self._footprint)
-                bars = self._footprint.index.get_level_values("bar_start").nunique()
-                self._log(f"Футпринт готов: {cells:,} ячеек, {bars:,} баров")
-                # Тепловая карта -- это прямоугольник на каждую ячейку, поэтому
-                # очень большой футпринт рисуем только по кнопке «Бэктест»
-                # (там график всё равно перерисовывается по результату).
-                if cells <= 20_000:
-                    self.chart.show_footprint(self._footprint)
-                else:
-                    self._log("Футпринт большой: тепловая карта появится после бэктеста")
+            # Чтение и признаки -- в фоне: на 1-минутном футпринте это ~50 с.
+            self.load_marketdata_files_async([result.footprint_path])
 
     def _generate_synthetic(self) -> None:
         self.radio_synth.setChecked(True)
@@ -617,15 +652,22 @@ class MainWindow(QMainWindow):
     # ================================================================== #
     # Запуск задач
     # ================================================================== #
-    def _set_busy(self, busy: bool, message: str = "") -> None:
+    def _set_busy(self, busy: bool, message: str = "", *, stoppable: bool = True) -> None:
+        """Заблокировать кнопки запуска на время расчёта.
+
+        ``stoppable=False`` -- задача не умеет прерываться (например, чтение
+        футпринта: внутри ``pd.read_parquet``/расчёта признаков нет точек
+        проверки), поэтому кнопка «Стоп» неактивна, а не врёт пользователю.
+        """
         self.btn_backtest.setEnabled(not busy)
         self.btn_optimize.setEnabled(not busy)
         self.btn_tick_data.setEnabled(not busy)
+        self.btn_open_marketdata.setEnabled(not busy)
         self.btn_wfa.setEnabled(not busy)
         self.btn_wfa_matrix.setEnabled(not busy)
         self.btn_mc.setEnabled(not busy)
         self.btn_pbo.setEnabled(not busy)
-        self.btn_stop.setEnabled(busy)
+        self.btn_stop.setEnabled(busy and stoppable)
         self.mc_panel.set_running(busy)
         self.pbo_panel.set_running(busy)
         self.ml_panel.set_running(busy)
@@ -1406,6 +1448,11 @@ class MainWindow(QMainWindow):
         self.result_charts.show_result(result)
         self.trades_table.show_result(result)
         self.chart.show_result(result)
+        if result.footprint is not None and len(result.footprint) > MAX_FOOTPRINT_CELLS:
+            self._log(
+                f"Тепловая карта футпринта пропущена: {len(result.footprint):,} ячеек "
+                f"больше предела {MAX_FOOTPRINT_CELLS:,} (отрисовка заняла бы минуты)"
+            )
         self.tabs.setCurrentWidget(self.results_tab)
         self._log(
             f"Бэктест завершён: прибыль {stats.net_profit:,.2f} "

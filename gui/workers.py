@@ -444,6 +444,42 @@ class WfaMatrixWorker(QThread):
 # --------------------------------------------------------------------------- #
 # Тиковые данные (архивы бирж)
 # --------------------------------------------------------------------------- #
+class FootprintLoadWorker(QThread):
+    """Чтение footprint Parquet + расчёт барных признаков -- в фоне.
+
+    Зачем в фоне: на 1-минутном футпринте за месяцы признаки ордерфлоу
+    считаются десятки секунд (753k ячеек -> ~50 с). В GUI-потоке это
+    останавливает обработку событий Qt, и ОС помечает окно как зависшее.
+
+    Прерывание не поддерживается: точки проверки внутри ``pd.read_parquet``
+    и ``bar_features_from_footprint`` отсутствуют, поэтому кнопка «Стоп» на
+    время загрузки неактивна (см. ``_set_busy(stoppable=False)``).
+    """
+
+    finished_ok = Signal(object)   # (footprint, market_features)
+    failed = Signal(str)
+    status = Signal(str)           # текстовый статус этапа
+
+    def __init__(self, paths, parent=None) -> None:
+        super().__init__(parent)
+        self.paths = list(paths)
+
+    def run(self) -> None:
+        from .footprint_loader import footprint_features, read_footprint
+
+        try:
+            self.status.emit("Чтение footprint Parquet...")
+            footprint = read_footprint(self.paths)
+            self.status.emit(
+                f"Расчёт признаков ордерфлоу ({len(footprint):,} ячеек)..."
+            )
+            features = footprint_features(footprint)
+        except Exception as exc:  # noqa: BLE001 - текст ошибки показываем в GUI
+            self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit((footprint, features))
+
+
 class ArchiveDownloadWorker(QThread):
     """Загрузка тиковых архивов бирж + сборка футпринта и свечей — в фоне.
 

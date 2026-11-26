@@ -68,6 +68,12 @@ COLOR_GRID = "#ffffff"
 # Палитра для индикаторов без явного цвета (циклически по порядку объявления)
 INDICATOR_PALETTE = ("#f5b041", "#5dade2", "#bb8fce", "#48c9b0", "#ec7063", "#f7dc6f")
 
+#: Предел ячеек теплокарты: на каждую ячейку создаётся отдельный
+#: QGraphicsRectItem, поэтому 1-минутный футпринт за месяцы (753k ячеек)
+#: рисуется десятками минут и всё это время подвешивает главный поток.
+#: Замеры: 20 000 ячеек -- 2.7 с, 60 000 -- 22.9 с (рост быстрее линейного).
+MAX_FOOTPRINT_CELLS = 20_000
+
 
 def make_grid_item() -> pg.GridItem:
     """Пунктирная сетка; полупрозрачность GridItem выставляет сам (alpha<=50)."""
@@ -197,7 +203,7 @@ class ChartWidget(QWidget):
         # Оверлеи индикаторов рисуем сразу после свечей -- маркеры сделок лягут поверх
         self._plot_overlays(df, getattr(result, "indicators", None))
         footprint = getattr(result, "footprint", None)
-        if footprint is not None:
+        if footprint is not None and len(footprint) <= MAX_FOOTPRINT_CELLS:
             self.show_footprint(footprint)
 
         trades = result.trades_df()
